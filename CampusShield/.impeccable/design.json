@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-08T23:22:42+05:30",
+  "title": "Design System: CampusShield",
+  "extensions": {
+    "colorMeta": {
+      "canvas": { "role": "neutral", "displayName": "Midnight Canvas", "canonical": "#07111f", "tonalRamp": ["#02070d", "#07111f", "#0d2038", "#193650", "#36536c", "#667b8d", "#aebac5", "#edf2f6"] },
+      "shell": { "role": "neutral", "displayName": "NOC Shell", "canonical": "#091827", "tonalRamp": ["#03080d", "#091827", "#10283d", "#1b3c55", "#38586e", "#687f90", "#afbdc7", "#edf2f5"] },
+      "panel": { "role": "neutral", "displayName": "Evidence Panel", "canonical": "#0c1d2d", "tonalRamp": ["#04090e", "#0c1d2d", "#143047", "#21445e", "#405f74", "#708697", "#b4c0c8", "#eef2f5"] },
+      "panel-raised": { "role": "neutral", "displayName": "Raised Panel", "canonical": "#102436", "tonalRamp": ["#050b11", "#102436", "#19384f", "#294d66", "#48677b", "#758b9a", "#b8c3ca", "#eff3f5"] },
+      "border": { "role": "neutral", "displayName": "Hairline Border", "canonical": "#24384a", "tonalRamp": ["#0a1016", "#172632", "#24384a", "#3a5164", "#5b7081", "#8395a3", "#c0c9cf", "#f0f3f5"] },
+      "border-strong": { "role": "neutral", "displayName": "Strong Border", "canonical": "#355066", "tonalRamp": ["#0d151b", "#213544", "#355066", "#4d687d", "#6d8495", "#94a5b1", "#c9d0d5", "#f2f4f6"] },
+      "text-primary": { "role": "neutral", "displayName": "Primary Text", "canonical": "#f4f7fa", "tonalRamp": ["#172029", "#35414c", "#5b6772", "#818c96", "#a8b1ba", "#cad1d7", "#e5e9ed", "#f4f7fa"] },
+      "text-secondary": { "role": "neutral", "displayName": "Secondary Text", "canonical": "#9db0c0", "tonalRamp": ["#101b24", "#293946", "#465966", "#657a89", "#8296a5", "#9db0c0", "#cbd4dc", "#f0f3f5"] },
+      "text-tertiary": { "role": "neutral", "displayName": "Tertiary Text", "canonical": "#8ba0b2", "tonalRamp": ["#0e1922", "#263641", "#42535f", "#607382", "#768b9b", "#8ba0b2", "#c5cfd7", "#eef2f5"] },
+      "route-active": { "role": "primary", "displayName": "Active Route Cyan", "canonical": "#38bdf8", "tonalRamp": ["#062a3c", "#075174", "#087cae", "#14a3df", "#38bdf8", "#72d1fb", "#afe5fd", "#e8f8ff"] },
+      "status-normal": { "role": "tertiary", "displayName": "Normal Green", "canonical": "#32d583", "tonalRamp": ["#062e1d", "#075a37", "#0a8955", "#19b46f", "#32d583", "#70e2aa", "#adefd0", "#e8fbf2"] },
+      "status-degraded": { "role": "tertiary", "displayName": "Degraded Amber", "canonical": "#f5b942", "tonalRamp": ["#392504", "#704a06", "#a97009", "#da971d", "#f5b942", "#f8ce7b", "#fbe3b4", "#fff7e8"] },
+      "status-critical": { "role": "tertiary", "displayName": "Critical Red", "canonical": "#f97066", "tonalRamp": ["#3c100d", "#74201b", "#aa312a", "#dc4b42", "#f97066", "#fa9c95", "#fcc7c3", "#fff0ef"] },
+      "route-inspected": { "role": "secondary", "displayName": "Inspected Route Blue", "canonical": "#7aa2f7", "tonalRamp": ["#14244b", "#27478d", "#3e6bd0", "#618cef", "#7aa2f7", "#a2bef9", "#cadbfc", "#eff5ff"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Page Display", "purpose": "Compact page title in the system bar." },
+      "headline": { "displayName": "Operational Headline", "purpose": "Network-health statement and primary status." },
+      "title": { "displayName": "Section Title", "purpose": "Sections and panel headers." },
+      "body": { "displayName": "Interface Body", "purpose": "Operational explanations, notes, and controls." },
+      "label": { "displayName": "Evidence Label", "purpose": "Uppercase categories, provenance, and measurement labels." },
+      "data": { "displayName": "Technical Data", "purpose": "Measurements, addresses, costs, timestamps, and aligned evidence." }
+    },
+    "shadows": [
+      { "name": "live-status-halo", "value": "0 0 0 3px rgba(50,213,131,.12)", "purpose": "State halo behind the read-only evidence-console dot; not an elevation shadow." }
+    ],
+    "motion": [
+      { "name": "control-state", "value": "background 120ms ease-out, border-color 120ms ease-out", "purpose": "Navigation hover and selection feedback." },
+      { "name": "reduced-motion", "value": "transition-duration: .01ms; animation-duration: .01ms", "purpose": "Near-instant fallback under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "stack", "value": "1100px" },
+      { "name": "mobile-navigation", "value": "768px" },
+      { "name": "compact-mobile", "value": "480px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Read-only dashboard action with compact NOC geometry.",
+      "html": "<button class=\"ds-btn-secondary\">Reload run index</button>",
+      "css": ".ds-btn-secondary { min-height:36px; padding:.5rem .75rem; border-radius:4px; background:var(--cs-panel-2, #102436); color:var(--cs-text, #f4f7fa); border:1px solid var(--cs-line-strong, #355066); font:600 .78rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-btn-secondary:hover { border-color:var(--cs-cyan, #38bdf8); color:#e7f7ff; } .ds-btn-secondary:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
+    },
+    {
+      "name": "Active Navigation Item",
+      "kind": "nav",
+      "refersTo": "navigation-item-active",
+      "description": "Selected destination in the persistent navigation rail.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-active\" href=\"#\"><span class=\"ds-nav-dot\"></span>Topology</a><a class=\"ds-nav-item\" href=\"#\"><span class=\"ds-nav-dot\"></span>Telemetry</a></nav>",
+      "css": ".ds-nav { display:grid; gap:2px; width:220px; background:var(--cs-shell, #091827); padding:.5rem; } .ds-nav-item { min-height:38px; display:flex; align-items:center; gap:.55rem; padding:0 .7rem; border:1px solid transparent; border-radius:4px; color:var(--cs-text, #f4f7fa); text-decoration:none; font:600 .82rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; transition:background 120ms ease-out, border-color 120ms ease-out; } .ds-nav-item:hover { background:#102436; border-color:#22384a; } .ds-nav-active { background:#12314a; border-color:#275475; color:#d9f3ff; font-weight:650; } .ds-nav-dot { width:14px; height:14px; border-radius:50%; border:1px solid var(--cs-line-strong, #355066); } .ds-nav-active .ds-nav-dot { border:4px solid var(--cs-cyan, #38bdf8); background:#d9f3ff; } .ds-nav-item:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
+    },
+    {
+      "name": "Evidence Select",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Compact selector for an evidence run or inspected link.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Evidence run</span><select class=\"ds-select\"><option>#21 · FAILURE_RECOVERY · COMPLETED</option></select></label>",
+      "css": ".ds-field { display:grid; gap:.4rem; color:var(--cs-muted, #9db0c0); font:400 .75rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-select { min-height:38px; padding:0 .7rem; border-radius:4px; background:var(--cs-panel, #0c1d2d); color:var(--cs-text, #f4f7fa); border:1px solid var(--cs-line-strong, #355066); font:400 .78rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-select:hover { border-color:var(--cs-cyan, #38bdf8); } .ds-select:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
+    },
+    {
+      "name": "Normal Status Pill",
+      "kind": "chip",
+      "refersTo": "status-pill-normal",
+      "description": "Non-color-reliant operational state label.",
+      "html": "<span class=\"ds-status-pill\"><span class=\"ds-status-dot\"></span>NORMAL</span>",
+      "css": ".ds-status-pill { display:inline-flex; align-items:center; gap:.35rem; padding:.24rem .48rem; border:1px solid currentColor; border-radius:999px; color:var(--cs-green, #32d583); font:750 .68rem/1.25 \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; letter-spacing:.05em; } .ds-status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; } .ds-status-pill:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
+    },
+    {
+      "name": "Evidence Panel",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Bordered key/value container for operational evidence.",
+      "html": "<section class=\"ds-panel\"><header class=\"ds-panel-head\"><strong>Control plane</strong><span>Latest evidence</span></header><div class=\"ds-kv\"><span>ANRE state</span><code>NORMAL</code></div><div class=\"ds-kv\"><span>Observed route</span><code>Alternate R1–R3–R2</code></div></section>",
+      "css": ".ds-panel { overflow:hidden; border:1px solid var(--cs-line, #24384a); border-radius:6px; background:var(--cs-panel, #0c1d2d); color:var(--cs-text, #f4f7fa); font-family:\"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-panel-head { min-height:44px; padding:.7rem .9rem; display:flex; justify-content:space-between; align-items:center; gap:1rem; border-bottom:1px solid var(--cs-line, #24384a); font-size:.82rem; } .ds-panel-head span { color:var(--cs-dim, #8ba0b2); font-size:.68rem; } .ds-kv { display:grid; grid-template-columns:minmax(110px,.7fr) minmax(0,1.3fr); border-top:1px solid var(--cs-line, #24384a); } .ds-kv:first-of-type { border-top:0; } .ds-kv span, .ds-kv code { padding:.58rem .75rem; font-size:.74rem; } .ds-kv span { color:var(--cs-muted, #9db0c0); } .ds-kv code { color:var(--cs-text, #f4f7fa); text-align:right; font-family:\"Cascadia Code\", \"SFMono-Regular\", Consolas, monospace; }"
+    },
+    {
+      "name": "Measurement Band",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "A unified four-cell band for aligned network measurements.",
+      "html": "<div class=\"ds-measurements\"><div class=\"ds-measure\"><span>RTT</span><strong>21.26 ms</strong></div><div class=\"ds-measure\"><span>PACKET LOSS</span><strong>0.00%</strong></div><div class=\"ds-measure\"><span>JITTER</span><strong>0.28 ms</strong></div><div class=\"ds-measure\"><span>UTILIZATION</span><strong>0.01%</strong></div></div>",
+      "css": ".ds-measurements { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); overflow:hidden; border:1px solid var(--cs-line, #24384a); border-radius:6px; background:var(--cs-panel, #0c1d2d); } .ds-measure { min-width:0; padding:.85rem 1rem; border-right:1px solid var(--cs-line, #24384a); } .ds-measure:last-child { border-right:0; } .ds-measure span { display:block; color:var(--cs-muted, #9db0c0); font:400 .68rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; letter-spacing:.065em; } .ds-measure strong { display:block; margin-top:.25rem; color:var(--cs-text, #f4f7fa); font:650 1.08rem \"Cascadia Code\", \"SFMono-Regular\", Consolas, monospace; font-variant-numeric:tabular-nums; white-space:nowrap; } @media (max-width:768px) { .ds-measurements { grid-template-columns:repeat(2,minmax(0,1fr)); } .ds-measure:nth-child(2) { border-right:0; } .ds-measure:nth-child(-n+2) { border-bottom:1px solid var(--cs-line, #24384a); } } @media (max-width:480px) { .ds-measurements { grid-template-columns:1fr; } .ds-measure { border-right:0; border-bottom:1px solid var(--cs-line, #24384a); } .ds-measure:last-child { border-bottom:0; } }"
+    },
+    {
+      "name": "Campus Topology",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "Signature campus route map showing active, alternate, and segment links.",
+      "html": "<div class=\"ds-topology\"><svg viewBox=\"0 0 520 270\" role=\"img\" aria-label=\"Campus topology with active route from R1 through R3 to R2\"><line class=\"ds-link-alt\" x1=\"105\" y1=\"90\" x2=\"415\" y2=\"90\"/><line class=\"ds-link-active\" x1=\"105\" y1=\"90\" x2=\"260\" y2=\"205\"/><line class=\"ds-link-active\" x1=\"260\" y1=\"205\" x2=\"415\" y2=\"90\"/><line class=\"ds-link-segment\" x1=\"105\" y1=\"90\" x2=\"45\" y2=\"35\"/><line class=\"ds-link-segment\" x1=\"415\" y1=\"90\" x2=\"480\" y2=\"35\"/><line class=\"ds-link-segment\" x1=\"260\" y1=\"205\" x2=\"180\" y2=\"252\"/><line class=\"ds-link-segment\" x1=\"260\" y1=\"205\" x2=\"340\" y2=\"252\"/><g class=\"ds-router\"><rect x=\"81\" y=\"66\" width=\"48\" height=\"48\"/><text x=\"105\" y=\"95\">R1</text><rect x=\"391\" y=\"66\" width=\"48\" height=\"48\"/><text x=\"415\" y=\"95\">R2</text><rect x=\"236\" y=\"181\" width=\"48\" height=\"48\"/><text x=\"260\" y=\"210\">R3</text></g><g class=\"ds-segments\"><circle cx=\"45\" cy=\"35\" r=\"9\"/><circle cx=\"480\" cy=\"35\" r=\"9\"/><circle cx=\"180\" cy=\"252\" r=\"9\"/><circle cx=\"340\" cy=\"252\" r=\"9\"/></g></svg></div>",
+      "css": ".ds-topology { padding:1rem; border-radius:6px; background:var(--cs-panel, #0c1d2d); } .ds-topology svg { display:block; width:100%; height:auto; } .ds-link-active { stroke:var(--cs-cyan, #38bdf8); stroke-width:5; } .ds-link-alt { stroke:var(--cs-blue, #7aa2f7); stroke-width:3; stroke-dasharray:4 4; } .ds-link-segment { stroke:#274154; stroke-width:1.5; } .ds-router rect { fill:#12314a; stroke:var(--cs-cyan, #38bdf8); stroke-width:1.5; } .ds-router text { fill:var(--cs-text, #f4f7fa); font:13px \"Segoe UI Variable\", \"Segoe UI\", Arial, sans-serif; text-anchor:middle; dominant-baseline:middle; } .ds-segments circle { fill:#0f2537; stroke:#4b6579; stroke-width:1; }"
+    },
+    {
+      "name": "Empty Evidence State",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "Explicit unavailable state used instead of synthetic evidence.",
+      "html": "<div class=\"ds-empty\">No telemetry is stored for this run. Select another run or inspect its Events and System pages.</div>",
+      "css": ".ds-empty { padding:1.25rem; border:1px dashed var(--cs-line-strong, #355066); border-radius:6px; background:rgba(12,29,45,.45); color:var(--cs-muted, #9db0c0); font:400 .78rem/1.45 \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Network Atlas",
+    "overview": "CampusShield is a dark infrastructure atlas: a serious network-operations surface where topology, route state, telemetry, decisions, and experimental provenance are the visual story. The system favors evidence density, precise alignment, and progressive disclosure over a marketing hero or a wall of equal KPI cards.\n\nThe working field is blue-black, nested operational surfaces are cool navy, and hairline seams organize information without visual noise. Real topology is the signature expression. Every status, trend, and action must remain traceable to SQLite or result-file evidence; missing evidence is shown explicitly.",
+    "keyCharacteristics": [
+      "Dark, compact NOC shell with deliberate information density.",
+      "Real network topology and active routes as the signature visual.",
+      "Evidence-first hierarchy with explicit run and result-file provenance.",
+      "Cyan for interaction and routing; green, amber, and red only for state.",
+      "High-contrast technical values, visible focus, and honest empty states."
+    ],
+    "rules": [
+      { "name": "The Semantic Signal Rule", "body": "Green, amber, and red communicate NORMAL, DEGRADED, and CRITICAL states only; they are never decorative accents.", "section": "colors" },
+      { "name": "The Cyan Path Rule", "body": "Cyan identifies interaction, keyboard focus, and the active network path, making its rarity operationally meaningful.", "section": "colors" },
+      { "name": "The Evidence Face Rule", "body": "Use monospace for machine values, not for general prose or headings.", "section": "typography" },
+      { "name": "The Topology-First Rule", "body": "When topology shares a row with supporting evidence, topology receives the larger region and remains legible before ancillary detail.", "section": "layout" },
+      { "name": "The Tonal Depth Rule", "body": "Surfaces gain hierarchy through navy tone and hairline seams; do not add floating-card shadows.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do make the selected run or result-file provenance explicit near the page title.",
+      "Do keep topology, values, timestamps, labels, and chart states traceable to real SQLite or CSV evidence.",
+      "Do pair every semantic color with a named state, label, line style, or other non-color cue.",
+      "Do preserve visible keyboard focus, reduced-motion behavior, mobile access to all nine navigation destinations, and the verified small secondary-text contrast of approximately 6.32:1.",
+      "Do show an explicit unavailable or empty state when evidence is sparse."
+    ],
+    "donts": [
+      "Don't fabricate trends, topology state, routing state, decisions, events, or experimental results.",
+      "Don't use green, amber, or red as decorative brand colors.",
+      "Don't replace the topology-led evidence hierarchy with a generic wall of equal KPI cards.",
+      "Don't add soft floating shadows, oversized marketing typography, or spacious consumer-SaaS padding.",
+      "Don't hide experimental provenance or imply that validation-only evidence belongs to the selected operational run."
+    ]
+  }
+}

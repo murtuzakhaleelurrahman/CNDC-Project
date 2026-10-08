@@ -1,0 +1,3 @@
+group_id,repetition,scenario,run_id,sample_count,mean_rtt_ms,mean_probe_loss_percent,mean_probe_jitter_ms,mean_utilization_percent,mean_nhs,emergency_throughput_mbps,emergency_udp_loss_percent,emergency_udp_jitter_ms,academic_throughput_mbps,bulk_throughput_mbps,controller_response_seconds,final_policy
+20261008T144646Z,1,ANRE_OFF,5,11,11.332727272727272,0.0,0.9,99.24858251715983,65.89073055626316,19.00693390284277,69.68463395012067,0.46453639391799156,45.98242215226202,27.837056028675942,,NORMAL
+20261008T144646Z,1,ANRE_ON,6,10,12.120000000000001,0.0,2.15,95.7057815513568,64.85911176822961,33.88598769278199,46.144934998069246,0.4089206075993761,40.41126959162193,15.187385159545927,2.506349235000016,DEGRADED

@@ -1,0 +1,5 @@
+group_id,repetition,run_id,failure_timestamp_utc,packets_lost_during_convergence,service_interruption_ms,route_convergence_ms,primary_restoration_ms,last_success_before_outage_utc,first_success_after_outage_utc,route_before,route_after_failure,route_after_restoration,full_neighbors_before,full_neighbors_after_failure,pre_failure_nhs,backup_path_nhs
+20261008T145828Z,1,12,2026-10-08T14:58:49.594641+00:00,14,1570.678949356079,1546.4239769989945,10992.767506000746,2026-10-08T14:58:49.629925+00:00,2026-10-08T14:58:51.200604+00:00,"10.10.20.10 via 10.10.255.2 dev r1-eth0 src 10.10.255.1 uid 0 
+    cache","10.10.20.10 via 10.10.255.6 dev r1-eth1 src 10.10.255.5 uid 0 
+    cache","10.10.20.10 via 10.10.255.2 dev r1-eth0 src 10.10.255.1 uid 0 
+    cache",2,1,79.11390445099155,76.8333452921748

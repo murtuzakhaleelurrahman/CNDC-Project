@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+"""CampusShield read-only Network Operations Center dashboard."""
+
+from __future__ import annotations
+
+import html
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_ROOT = PROJECT_ROOT / "results"
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from dashboard.queries import (  # noqa: E402
+    load_latest_telemetry,
+    load_recent_events,
+    load_results,
+    load_runs,
+    load_telemetry_history,
+)
+from dashboard.theme import NOC_CSS  # noqa: E402
+
+
+DEFAULT_DATABASE_PATH = PROJECT_ROOT / "database" / "campusshield.db"
+DATABASE_PATH = Path(os.environ.get("CAMPUSSHIELD_DB_PATH", str(DEFAULT_DATABASE_PATH)))
+
+COLORS = {
+    "bg": "#07111f", "panel": "#0c1d2d", "line": "#24384a",
+    "text": "#f4f7fa", "muted": "#9db0c0", "dim": "#6f8496",
+    "cyan": "#38bdf8", "green": "#32d583", "amber": "#f5b942",
+    "red": "#f97066", "blue": "#7aa2f7",
+}
+
+NAVIGATION = (
+    "Overview", "Topology", "Telemetry", "Routing", "QoS", "ANRE",
+    "Experiments", "Events", "System",
+)
+
+QOS_POLICIES = {
+    "NORMAL": {"Emergency / Real-Time": 20, "Academic / Administrative": 50, "Hostel / Bulk": 30},
+    "DEGRADED": {"Emergency / Real-Time": 40, "Academic / Administrative": 45, "Hostel / Bulk": 15},
+    "CRITICAL": {"Emergency / Real-Time": 55, "Academic / Administrative": 35, "Hostel / Bulk": 10},
+    "NO_CONGESTION": {"Emergency / Real-Time": 20, "Academic / Administrative": 50, "Hostel / Bulk": 30},
+}
+
+CORE_LINKS = [
+    {"name": "R1–R2", "network": "10.10.255.0/30", "cost": 10, "capacity": 100, "delay": "5 ms", "interfaces": "r1-eth0 ↔ r2-eth0"},
+    {"name": "R1–R3", "network": "10.10.255.4/30", "cost": 15, "capacity": 100, "delay": "5 ms", "interfaces": "r1-eth1 ↔ r3-eth0"},
+    {"name": "R2–R3", "network": "10.10.255.8/30", "cost": 15, "capacity": 100, "delay": "5 ms", "interfaces": "r2-eth1 ↔ r3-eth1"},
+]
+
+SEGMENTS = [
+    {"segment": "Emergency", "subnet": "10.10.10.0/26", "gateway": "10.10.10.1", "router": "R1", "host": "emergency1 · 10.10.10.10"},
+    {"segment": "Admin", "subnet": "10.10.20.0/24", "gateway": "10.10.20.1", "router": "R2", "host": "admin1 · 10.10.20.10"},
+    {"segment": "Academic", "subnet": "10.10.30.0/23", "gateway": "10.10.30.1", "router": "R2", "host": "academic1 · 10.10.30.10"},
+    {"segment": "Hostel", "subnet": "10.10.40.0/22", "gateway": "10.10.40.1", "router": "R3", "host": "hostel1 · 10.10.40.10"},
+    {"segment": "IoT/CCTV", "subnet": "10.10.50.0/25", "gateway": "10.10.50.1", "router": "R3", "host": "iot1 · 10.10.50.10"},
+]
+
+
+st.set_page_config(
+    page_title="CampusShield NOC", layout="wide",
+    initial_sidebar_state="auto",
+)
+st.markdown(NOC_CSS, unsafe_allow_html=True)
+
+
+def esc(value: Any) -> str:
+    return html.escape("—" if value is None else str(value))
+
+
+def display_value(value: Any, suffix: str = "", decimals: int = 2) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "Unavailable"
+    if isinstance(value, (int, float)):
+        return f"{value:.{decimals}f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def state_class(state: str | None) -> str:
+    return {
+        "NORMAL": "cs-normal", "DEGRADED": "cs-degraded",
+        "CRITICAL": "cs-critical", "DISABLED": "cs-disabled",
+    }.get(str(state or "UNKNOWN").upper(), "cs-unknown")
+
+
+def format_timestamp(value: Any) -> str:
+    if not value:
+        return "No timestamp"
+    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(timestamp):
+        return str(value)
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def latest_result(pattern: str) -> Path | None:
+    files = sorted(RESULTS_ROOT.glob(pattern))
+    return files[-1] if files else None
+
+
+def read_result(pattern: str) -> tuple[pd.DataFrame | None, Path | None]:
+    path = latest_result(pattern)
+    if path is None:
+        return None, None
+    try:
+        return pd.read_csv(path), path
+    except (OSError, pd.errors.ParserError):
+        return None, path
+
+
+def style_figure(figure: go.Figure, height: int = 330) -> go.Figure:
+    figure.update_layout(
+        height=height, margin=dict(l=28, r=20, t=46, b=30),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["panel"],
+        font=dict(family="Segoe UI, Arial, sans-serif", color=COLORS["muted"], size=11),
+        title_font=dict(color=COLORS["text"], size=14),
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=1.12, x=0),
+        hoverlabel=dict(bgcolor="#102436", bordercolor=COLORS["line"], font_color=COLORS["text"]),
+        hovermode="x unified",
+    )
+    figure.update_xaxes(gridcolor=COLORS["line"], zeroline=False, linecolor=COLORS["line"])
+    figure.update_yaxes(gridcolor=COLORS["line"], zeroline=False, linecolor=COLORS["line"])
+    return figure
+
+
+def section_header(title: str, note: str = "") -> None:
+    st.markdown(
+        f'<div class="cs-section"><h2>{esc(title)}</h2><p>{esc(note)}</p></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def empty_state(message: str) -> None:
+    st.markdown(f'<div class="cs-empty">{esc(message)}</div>', unsafe_allow_html=True)
+
+
+def render_header(page: str, run: dict[str, Any]) -> None:
+    if page == "Experiments":
+        context_label = "Evidence scope"
+        context_value = "Latest complete result files · independent of sidebar run"
+    else:
+        run_kind = "Experiment" if run["is_experimental"] else "Validation"
+        context_label = f"Selected {run_kind}"
+        context_value = f"Run #{run['id']} · {run['name']} · {run['status']}"
+    st.markdown(
+        f"""
+        <div class="cs-topbar">
+          <div><h1 class="cs-title">{esc(page)}</h1>
+          <p class="cs-subtitle">CampusShield Network Operations Center</p></div>
+          <div class="cs-run"><div class="cs-run-label">{esc(context_label)}</div>
+          <div class="cs-run-value">{esc(context_value)}</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_state_line(latest: dict[str, Any] | None, run: dict[str, Any]) -> None:
+    if latest is None:
+        empty_state("No telemetry is stored for this run. Select another run or inspect its Events and System pages.")
+        return
+    state = str(latest.get("anre_state") or "UNKNOWN").upper()
+    score = display_value(latest.get("nhs"), "/100", 1)
+    st.markdown(
+        f"""
+        <div class="cs-state-line">
+          <div class="cs-state-primary"><strong>Network health</strong>
+          <span class="cs-score">{esc(score)}</span>
+          <span class="cs-pill {state_class(state)}">{esc(state)}</span></div>
+          <div class="cs-state-meta">Snapshot from run #{run['id']}<br>
+          {esc(format_timestamp(latest.get('timestamp_utc')))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_measurements(latest: dict[str, Any] | None) -> None:
+    if latest is None:
+        return
+    measurements = [
+        ("RTT", display_value(latest.get("rtt_ms"), " ms")),
+        ("Packet loss", display_value(latest.get("packet_loss_percent"), "%")),
+        ("Jitter", display_value(latest.get("jitter_ms"), " ms")),
+        ("Utilization", display_value(latest.get("utilization_percent"), "%")),
+    ]
+    content = "".join(
+        f'<div class="cs-measure"><div class="cs-measure-label">{esc(label)}</div>'
+        f'<div class="cs-measure-value">{esc(value)}</div></div>'
+        for label, value in measurements
+    )
+    st.markdown(f'<div class="cs-measurements">{content}</div>', unsafe_allow_html=True)
+
+
+def panel_html(title: str, rows: list[tuple[str, Any]], note: str = "") -> str:
+    body = "".join(
+        f'<div class="cs-kv"><div class="cs-k">{esc(key)}</div><div class="cs-v">{esc(value)}</div></div>'
+        for key, value in rows
+    )
+    return (
+        '<div class="cs-panel">'
+        f'<div class="cs-panel-head"><div class="cs-panel-title">{esc(title)}</div>'
+        f'<span class="cs-panel-note">{esc(note)}</span></div>{body}</div>'
+    )
+
+
+def event_category(event: dict[str, Any]) -> str:
+    source = f"{event.get('component', '')} {event.get('event_type', '')}".lower()
+    for needle, category in (
+        ("anre", "ANRE"), ("qos", "QoS"), ("ospf", "OSPF"),
+        ("route", "Routing"), ("fail", "Failure"), ("recover", "Recovery"),
+    ):
+        if needle in source:
+            return category
+    return "System"
+
+
+def render_event_stream(events: list[dict[str, Any]], limit: int = 8) -> None:
+    if not events:
+        empty_state("No controller or routing events were recorded for this run.")
+        return
+    rows = []
+    for event in events[:limit]:
+        time_text = format_timestamp(event.get("timestamp_utc")).replace(" UTC", "")
+        rows.append(
+            '<div class="cs-event">'
+            f'<div class="cs-event-time">{esc(time_text)}</div>'
+            f'<div class="cs-event-cat">{esc(event_category(event))}</div>'
+            f'<div class="cs-event-msg">{esc(event.get("message") or event.get("event_type"))}</div>'
+            '</div>'
+        )
+    st.markdown('<div class="cs-panel">' + "".join(rows) + '</div>', unsafe_allow_html=True)
+
+
+def topology_figure(latest: dict[str, Any] | None, inspected_link: str | None = None) -> go.Figure:
+    active_interface = str((latest or {}).get("route_interface") or "")
+    active_links = {"R1–R2"} if active_interface == "r1-eth0" else ({"R1–R3", "R2–R3"} if active_interface == "r1-eth1" else set())
+    positions = {
+        "R1": (0.0, 1.0), "R2": (2.0, 1.0), "R3": (1.0, 0.0),
+        "Emergency": (-0.65, 1.55), "Admin": (2.65, 1.5), "Academic": (2.7, .55),
+        "Hostel": (.35, -.7), "IoT/CCTV": (1.7, -.7),
+    }
+    core_pairs = {"R1–R2": ("R1", "R2"), "R1–R3": ("R1", "R3"), "R2–R3": ("R2", "R3")}
+    figure = go.Figure()
+    for link in CORE_LINKS:
+        name = link["name"]
+        start, end = core_pairs[name]
+        x0, y0 = positions[start]
+        x1, y1 = positions[end]
+        active = name in active_links
+        inspected = name == inspected_link
+        color = COLORS["cyan"] if active else (COLORS["blue"] if inspected else COLORS["line"])
+        figure.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1], mode="lines",
+            line=dict(color=color, width=5 if active else (4 if inspected else 2), dash=None if active else "dot"),
+            hovertemplate=(f"<b>{name}</b><br>{link['network']}<br>Configured cost {link['cost']}"
+                           f"<br>{link['capacity']} Mbps · {link['delay']}<extra></extra>"),
+            showlegend=False,
+        ))
+    for segment, router in (("Emergency", "R1"), ("Admin", "R2"), ("Academic", "R2"), ("Hostel", "R3"), ("IoT/CCTV", "R3")):
+        sx, sy = positions[segment]
+        rx, ry = positions[router]
+        figure.add_trace(go.Scatter(
+            x=[sx, rx], y=[sy, ry], mode="lines",
+            line=dict(color="#274154", width=1.5), hoverinfo="skip", showlegend=False,
+        ))
+    routers = ["R1", "R2", "R3"]
+    figure.add_trace(go.Scatter(
+        x=[positions[n][0] for n in routers], y=[positions[n][1] for n in routers],
+        mode="markers+text", text=routers, textposition="middle center",
+        textfont=dict(color=COLORS["text"], size=13, family="Segoe UI, Arial"),
+        marker=dict(symbol="square", size=54, color="#12314a", line=dict(color=COLORS["cyan"], width=1.5)),
+        customdata=[["OSPF router"] for _ in routers],
+        hovertemplate="<b>%{text}</b><br>%{customdata[0]}<extra></extra>", showlegend=False,
+    ))
+    segment_names = ["Emergency", "Admin", "Academic", "Hostel", "IoT/CCTV"]
+    subnet_by_name = {item["segment"]: item["subnet"] for item in SEGMENTS}
+    figure.add_trace(go.Scatter(
+        x=[positions[n][0] for n in segment_names], y=[positions[n][1] for n in segment_names],
+        mode="markers+text", text=segment_names, textposition="bottom center",
+        textfont=dict(color=COLORS["muted"], size=10),
+        marker=dict(size=20, color="#0f2537", line=dict(color="#4b6579", width=1)),
+        customdata=[[subnet_by_name[n]] for n in segment_names],
+        hovertemplate="<b>%{text}</b><br>%{customdata[0]}<extra></extra>", showlegend=False,
+    ))
+    figure.update_layout(
+        height=430, margin=dict(l=20, r=20, t=25, b=20),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=COLORS["panel"],
+        xaxis=dict(visible=False, range=[-1.0, 3.0]), yaxis=dict(visible=False, range=[-1.0, 1.9]),
+        hoverlabel=dict(bgcolor="#102436", bordercolor=COLORS["line"], font_color=COLORS["text"]),
+    )
+    return figure
+
+
+def latest_decision(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in events:
+        if event_category(event) in {"ANRE", "QoS", "Routing", "Failure", "Recovery"}:
+            return event
+    return events[0] if events else None
+
+
+def render_overview(run: dict[str, Any], latest: dict[str, Any] | None, events: list[dict[str, Any]]) -> None:
+    render_state_line(latest, run)
+    render_measurements(latest)
+    decision = latest_decision(events)
+    left, right = st.columns([1.65, .75], gap="small")
+    with left:
+        section_header("Campus topology", "Active path is taken from the selected telemetry sample")
+        st.plotly_chart(topology_figure(latest), width="stretch", config={"displayModeBar": False})
+    with right:
+        section_header("Current decision", "Latest recorded controller evidence")
+        if latest is None:
+            empty_state("No decision context is available without telemetry.")
+        else:
+            route_label = "Primary R1–R2" if latest.get("route_interface") == "r1-eth0" else "Alternate R1–R3–R2"
+            rows = [
+                ("ANRE state", latest.get("anre_state") or "Not recorded"),
+                ("QoS policy", latest.get("qos_policy") or "Not recorded"),
+                ("Observed route", route_label),
+                ("Next hop", latest.get("route_next_hop") or "Not recorded"),
+                ("Interface", latest.get("route_interface") or "Not recorded"),
+                ("Last action", (decision or {}).get("action") or "No action recorded"),
+            ]
+            st.markdown(panel_html("Control plane", rows), unsafe_allow_html=True)
+            if decision and decision.get("message"):
+                st.markdown(f'<p class="cs-caption">Reason: {esc(decision["message"])}</p>', unsafe_allow_html=True)
+    section_header("Recent operational events", "Newest first")
+    render_event_stream(events, limit=6)
+
+
+def render_topology(latest: dict[str, Any] | None) -> None:
+    inspected = st.selectbox("Inspect core link", [link["name"] for link in CORE_LINKS], index=0)
+    st.plotly_chart(topology_figure(latest, inspected), width="stretch", config={"displayModeBar": False})
+    link = next(item for item in CORE_LINKS if item["name"] == inspected)
+    active_interface = str((latest or {}).get("route_interface") or "")
+    observed = (
+        "Active in selected sample" if (inspected == "R1–R2" and active_interface == "r1-eth0")
+        or (inspected in {"R1–R3", "R2–R3"} and active_interface == "r1-eth1")
+        else "Configured path; not observed active in selected sample"
+    )
+    st.markdown(panel_html(
+        inspected,
+        [("Link state", observed), ("Transit network", link["network"]), ("Interfaces", link["interfaces"]),
+         ("Capacity", f"{link['capacity']} Mbps"), ("Configured delay", link["delay"]),
+         ("Baseline OSPF cost", link["cost"])],
+        "Configuration plus selected-run observation",
+    ), unsafe_allow_html=True)
+    section_header("Campus segments", "Addressing defined by the topology")
+    st.dataframe(pd.DataFrame(SEGMENTS), width="stretch", hide_index=True)
+
+
+def render_telemetry(latest: dict[str, Any] | None, history: list[dict[str, Any]]) -> None:
+    render_measurements(latest)
+    if not history:
+        empty_state("No telemetry history is stored for this run.")
+        return
+    frame = pd.DataFrame(history)
+    frame["timestamp_utc"] = pd.to_datetime(frame["timestamp_utc"], utc=True)
+    quality = make_subplots(specs=[[{"secondary_y": True}]])
+    quality.add_trace(go.Scatter(x=frame["timestamp_utc"], y=frame["rtt_ms"], name="RTT", line=dict(color=COLORS["cyan"], width=2)), secondary_y=False)
+    quality.add_trace(go.Scatter(x=frame["timestamp_utc"], y=frame["jitter_ms"], name="Jitter", line=dict(color=COLORS["blue"], width=1.5)), secondary_y=False)
+    quality.add_trace(go.Scatter(x=frame["timestamp_utc"], y=frame["packet_loss_percent"], name="Packet loss", line=dict(color=COLORS["red"], width=1.5)), secondary_y=True)
+    quality.update_yaxes(title_text="Milliseconds", secondary_y=False)
+    quality.update_yaxes(title_text="Loss (%)", secondary_y=True)
+    style_figure(quality, 360).update_layout(title="Latency, jitter, and packet loss")
+    st.plotly_chart(quality, width="stretch", config={"displaylogo": False})
+    traffic = px.line(
+        frame, x="timestamp_utc", y=["tx_mbps", "rx_mbps", "utilization_percent"],
+        labels={"timestamp_utc": "Time (UTC)", "value": "Measured value", "variable": "Series"},
+        color_discrete_sequence=[COLORS["cyan"], COLORS["blue"], COLORS["amber"]],
+        title="Throughput and bandwidth utilization",
+    )
+    st.plotly_chart(style_figure(traffic, 350), width="stretch", config={"displaylogo": False})
+    with st.expander("Telemetry records and accessible chart data"):
+        st.dataframe(frame, width="stretch", hide_index=True)
+
+
+def render_routing(latest: dict[str, Any] | None, events: list[dict[str, Any]]) -> None:
+    if latest:
+        current_path = "R1 → R2 (preferred)" if latest.get("route_interface") == "r1-eth0" else "R1 → R3 → R2 (alternate)"
+        st.markdown(panel_html(
+            "Observed forwarding decision",
+            [("Current route", current_path), ("Next hop", latest.get("route_next_hop") or "Not recorded"),
+             ("Egress interface", latest.get("route_interface") or "Not recorded"),
+             ("Interface state", latest.get("route_state") or "Not recorded"),
+             ("Link health", display_value(latest.get("link_health"), "/100", 1))],
+            "Selected telemetry sample",
+        ), unsafe_allow_html=True)
+    else:
+        empty_state("No route observation is stored for this run.")
+    section_header("Redundant core", "Configured baseline costs; adaptive changes appear in recorded events")
+    st.plotly_chart(topology_figure(latest), width="stretch", config={"displayModeBar": False})
+    st.dataframe(pd.DataFrame(CORE_LINKS), width="stretch", hide_index=True)
+    route_events = [event for event in events if event_category(event) in {"Routing", "OSPF", "Failure", "Recovery"}]
+    section_header("Routing and convergence events", "Only events stored for the selected run")
+    render_event_stream(route_events, limit=20)
+
+
+def render_qos(latest: dict[str, Any] | None) -> None:
+    policy_name = str((latest or {}).get("qos_policy") or (latest or {}).get("anre_state") or "").upper()
+    rates = QOS_POLICIES.get(policy_name)
+    if rates is None:
+        empty_state("This run does not record a recognized QoS policy. Configured policies are shown below for reference.")
+        policy_name = "NORMAL"
+        rates = QOS_POLICIES[policy_name]
+        observed_label = "Configured reference only"
+    else:
+        observed_label = "Observed in selected sample"
+    st.markdown(panel_html(
+        "QoS policy",
+        [("Policy", policy_name), ("Evidence", observed_label), ("Scheduler", "HTB + FQ-CoDel"),
+         ("Classification", "DSCP EF / AF21 / CS1"), ("Core capacity", "100 Mbps")],
+    ), unsafe_allow_html=True)
+    frame = pd.DataFrame({"Traffic class": list(rates), "Allocation (Mbps)": list(rates.values())})
+    figure = px.bar(
+        frame, x="Allocation (Mbps)", y="Traffic class", orientation="h", text="Allocation (Mbps)",
+        color="Traffic class", color_discrete_map={
+            "Emergency / Real-Time": COLORS["red"],
+            "Academic / Administrative": COLORS["cyan"],
+            "Hostel / Bulk": COLORS["blue"],
+        }, title=f"{policy_name} bandwidth allocation",
+    )
+    figure.update_traces(texttemplate="%{text} Mbps", textposition="outside", cliponaxis=False)
+    figure.update_layout(showlegend=False)
+    st.plotly_chart(style_figure(figure, 320), width="stretch", config={"displaylogo": False})
+    section_header("Policy matrix", "Controller-defined allocations; values are not synthesized")
+    matrix = pd.DataFrame(QOS_POLICIES).T.reset_index(names="Policy")
+    st.dataframe(matrix, width="stretch", hide_index=True)
+
+
+def render_anre(run: dict[str, Any], latest: dict[str, Any] | None, events: list[dict[str, Any]]) -> None:
+    render_state_line(latest, run)
+    st.markdown(
+        """
+        <div class="cs-loop">
+          <div class="cs-loop-step"><b>MONITOR</b><span>Collect link and probe telemetry</span></div>
+          <div class="cs-loop-step"><b>ANALYZE</b><span>Calculate NHS and thresholds</span></div>
+          <div class="cs-loop-step"><b>DECIDE</b><span>Apply hysteresis and hold-down</span></div>
+          <div class="cs-loop-step"><b>ACT</b><span>Change QoS or OSPF cost</span></div>
+          <div class="cs-loop-step"><b>MEASURE AGAIN</b><span>Verify the network response</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    anre_events = [event for event in events if event_category(event) in {"ANRE", "QoS", "Routing", "Failure", "Recovery"}]
+    decision = latest_decision(anre_events)
+    section_header("Decision context", "Latest evidence recorded by the controller")
+    if latest:
+        st.markdown(panel_html(
+            "ANRE decision",
+            [("Current state", latest.get("anre_state") or "Not recorded"),
+             ("Current NHS", display_value(latest.get("nhs"), "/100", 1)),
+             ("Current action", (decision or {}).get("action") or "No action recorded"),
+             ("Previous state", (decision or {}).get("previous_state") or "Not recorded"),
+             ("QoS policy", latest.get("qos_policy") or "Not recorded"),
+             ("Reason", (decision or {}).get("message") or "No reason recorded")],
+        ), unsafe_allow_html=True)
+    else:
+        empty_state("ANRE context is unavailable because the selected run has no telemetry.")
+    section_header("Recent adaptive decisions", "State changes, QoS actions, routing actions, and recovery")
+    render_event_stream(anre_events, limit=25)
+
+
+def hypothesis_table(congestion: pd.DataFrame, failure: pd.DataFrame) -> pd.DataFrame:
+    off = congestion[congestion["scenario"] == "ANRE_OFF"]
+    on = congestion[congestion["scenario"] == "ANRE_ON"]
+    checks = [
+        ("H1 · RTT", on["mean_rtt_ms"].mean() < off["mean_rtt_ms"].mean(), "Mean RTT decreases with ANRE"),
+        ("H2 · Packet loss", on["emergency_udp_loss_percent"].mean() < off["emergency_udp_loss_percent"].mean(), "Emergency UDP loss decreases"),
+        ("H3 · Jitter", on["emergency_udp_jitter_ms"].mean() < off["emergency_udp_jitter_ms"].mean(), "Emergency UDP jitter decreases"),
+        ("H4 · NHS", on["mean_nhs"].mean() > off["mean_nhs"].mean(), "Mean NHS increases"),
+        ("H5 · QoS trade-off", on["emergency_throughput_mbps"].mean() > off["emergency_throughput_mbps"].mean() and on["bulk_throughput_mbps"].mean() < off["bulk_throughput_mbps"].mean(), "Emergency gains capacity while bulk is restricted"),
+        ("H6 · Routing recovery", failure["route_after_failure"].str.contains("r1-eth1", na=False).all() and failure["route_after_restoration"].str.contains("r1-eth0", na=False).all(), "Every repetition uses backup and restores primary"),
+    ]
+    rows = [{"Hypothesis": name, "Outcome": "SUPPORTED" if result else "NOT SUPPORTED", "Measured criterion": criterion} for name, result, criterion in checks]
+    rows.append({"Hypothesis": "H7 · Tuned OSPF", "Outcome": "NOT TESTED", "Measured criterion": "Secondary experiment has not been run"})
+    return pd.DataFrame(rows)
+
+
+def render_experiments() -> None:
+    baseline, baseline_path = read_result("baseline_run_*.csv")
+    congestion, congestion_path = read_result("congestion_comparison_*.csv")
+    failure, failure_path = read_result("failure_recovery_*.csv")
+    section_header("Experiment 1 · Baseline calibration", baseline_path.name if baseline_path else "No result file")
+    if baseline is None or baseline.empty:
+        empty_state("No baseline CSV is available.")
+    else:
+        baseline_summary = [
+            ("Samples", len(baseline)), ("Mean NHS", display_value(baseline["nhs"].mean(), "/100", 2)),
+            ("Mean RTT", display_value(baseline["rtt_ms"].mean(), " ms", 3)),
+            ("Mean loss", display_value(baseline["packet_loss_percent"].mean(), "%", 3)),
+            ("Mean jitter", display_value(baseline["jitter_ms"].mean(), " ms", 3)),
+            ("Mean utilization", display_value(baseline["utilization_percent"].mean(), "%", 3)),
+        ]
+        st.markdown(panel_html("Healthy-network reference", baseline_summary), unsafe_allow_html=True)
+        base = baseline.copy()
+        base["timestamp_utc"] = pd.to_datetime(base["timestamp_utc"], utc=True)
+        figure = px.line(base, x="timestamp_utc", y="nhs", labels={"timestamp_utc": "Time (UTC)", "nhs": "NHS"}, title="Baseline Network Health Score")
+        figure.update_traces(line_color=COLORS["green"], line_width=2)
+        st.plotly_chart(style_figure(figure, 300), width="stretch", config={"displaylogo": False})
+
+    section_header("Experiment 2 · ANRE OFF versus ANRE ON", congestion_path.name if congestion_path else "No result file")
+    if congestion is None or congestion.empty:
+        empty_state("No complete ANRE comparison CSV is available.")
+    else:
+        comparison_metrics = [
+            ("Emergency throughput", "emergency_throughput_mbps", "Mbps"),
+            ("Emergency UDP loss", "emergency_udp_loss_percent", "%"),
+            ("Emergency jitter", "emergency_udp_jitter_ms", "ms"),
+            ("Mean NHS", "mean_nhs", "/100"), ("Bulk throughput", "bulk_throughput_mbps", "Mbps"),
+        ]
+        long_rows = []
+        for label, column, unit in comparison_metrics:
+            for _, row in congestion.iterrows():
+                long_rows.append({"Metric": label, "Scenario": row["scenario"], "Repetition": str(row["repetition"]), "Value": row[column], "Unit": unit})
+        long_frame = pd.DataFrame(long_rows)
+        selected_metric = st.selectbox("Comparison metric", [item[0] for item in comparison_metrics])
+        selected = long_frame[long_frame["Metric"] == selected_metric]
+        chart = px.line(selected, x="Scenario", y="Value", color="Repetition", markers=True, category_orders={"Scenario": ["ANRE_OFF", "ANRE_ON"]}, title=f"Paired {selected_metric.lower()} results")
+        st.plotly_chart(style_figure(chart, 340), width="stretch", config={"displaylogo": False})
+
+    section_header("Experiment 3 · Physical link failure", failure_path.name if failure_path else "No result file")
+    if failure is None or failure.empty:
+        empty_state("No complete link-failure CSV is available.")
+    else:
+        failure_chart = go.Figure()
+        failure_chart.add_bar(name="Service interruption", x=failure["repetition"], y=failure["service_interruption_ms"], marker_color=COLORS["amber"])
+        failure_chart.add_bar(name="Route convergence", x=failure["repetition"], y=failure["route_convergence_ms"], marker_color=COLORS["cyan"])
+        failure_chart.update_layout(title="Recovery timing by repetition", barmode="group", xaxis_title="Repetition", yaxis_title="Milliseconds")
+        st.plotly_chart(style_figure(failure_chart, 340), width="stretch", config={"displaylogo": False})
+        st.markdown(panel_html("Measured recovery summary", [
+            ("Mean packets lost", display_value(failure["packets_lost_during_convergence"].mean(), "", 2)),
+            ("Mean interruption", display_value(failure["service_interruption_ms"].mean(), " ms", 2)),
+            ("Mean convergence", display_value(failure["route_convergence_ms"].mean(), " ms", 2)),
+            ("Mean primary restoration", display_value(failure["primary_restoration_ms"].mean(), " ms", 2)),
+        ]), unsafe_allow_html=True)
+
+    if congestion is not None and not congestion.empty and failure is not None and not failure.empty:
+        section_header("Hypothesis evaluation", "Descriptive evidence from three repetitions; no significance claim")
+        st.dataframe(hypothesis_table(congestion, failure), width="stretch", hide_index=True)
+
+
+def render_events(events: list[dict[str, Any]]) -> None:
+    if not events:
+        empty_state("No events are stored for the selected run.")
+        return
+    categories = sorted({event_category(event) for event in events})
+    severities = sorted({str(event.get("severity") or "UNKNOWN").upper() for event in events})
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_categories = st.multiselect("Categories", categories, default=categories)
+    with col2:
+        selected_severities = st.multiselect("Severity", severities, default=severities)
+    filtered = [event for event in events if event_category(event) in selected_categories and str(event.get("severity") or "UNKNOWN").upper() in selected_severities]
+    if not filtered:
+        empty_state("No events match the selected filters.")
+        return
+    frame = pd.DataFrame([{
+        "Timestamp (UTC)": format_timestamp(event.get("timestamp_utc")),
+        "Severity": str(event.get("severity") or "UNKNOWN").upper(),
+        "Category": event_category(event), "Event": event.get("event_type"),
+        "Description": event.get("message"), "Action": event.get("action"),
+    } for event in filtered])
+    st.dataframe(frame, width="stretch", hide_index=True)
+    section_header("Event timeline", f"{len(filtered)} matching records")
+    render_event_stream(filtered, limit=50)
+
+
+def render_system(run: dict[str, Any], latest: dict[str, Any] | None, results: list[dict[str, Any]]) -> None:
+    st.markdown(panel_html(
+        "Selected run",
+        [("Run ID", run["id"]), ("Name", run["name"]), ("Type", run["run_type"]),
+         ("Status", run["status"]), ("Experimental", "Yes" if run["is_experimental"] else "No"),
+         ("Started", format_timestamp(run.get("started_at_utc"))), ("Ended", format_timestamp(run.get("ended_at_utc"))),
+         ("Telemetry rows", run.get("telemetry_count", 0)), ("Event rows", run.get("event_count", 0)),
+         ("Result rows", run.get("result_count", 0))],
+    ), unsafe_allow_html=True)
+    section_header("Data sources", "Read-only dashboard access")
+    st.markdown(panel_html("Runtime", [
+        ("SQLite database", DATABASE_PATH), ("Database exists", "Yes" if DATABASE_PATH.is_file() else "No"),
+        ("Results directory", RESULTS_ROOT), ("Latest telemetry", format_timestamp((latest or {}).get("timestamp_utc"))),
+        ("Dashboard mode", "Read-only"),
+    ]), unsafe_allow_html=True)
+    section_header("Stored result metrics", "Rows committed for the selected run")
+    if results:
+        result_frame = pd.DataFrame(results)[["scenario", "traffic_class", "metric_name", "metric_value", "unit"]]
+        st.dataframe(result_frame, width="stretch", hide_index=True)
+    else:
+        empty_state("This run has no stored result metrics.")
+    st.markdown('<p class="cs-caption">The dashboard never changes Mininet, FRRouting, QoS, routing, security, or experiment state.</p>', unsafe_allow_html=True)
+
+
+if not DATABASE_PATH.is_file():
+    st.error(f"CampusShield database not found: {DATABASE_PATH}")
+    st.code("python3 database/validate_database.py", language="bash")
+    st.stop()
+
+try:
+    RUNS = load_runs(DATABASE_PATH)
+except Exception as error:  # pragma: no cover
+    st.error(f"Could not read the CampusShield database: {error}")
+    st.stop()
+
+if not RUNS:
+    st.warning("The database contains no runs yet. Complete a validation or experiment first.")
+    st.stop()
+
+run_by_id = {int(run["id"]): run for run in RUNS}
+run_labels = {int(run["id"]): f"#{run['id']} · {run['run_type']} · {run['status']}" for run in RUNS}
+
+st.sidebar.markdown(
+    '<div class="cs-brand"><div class="cs-brand-name">CampusShield</div>'
+    '<div class="cs-brand-sub">Network Operations Center</div>'
+    '<div class="cs-live"><span class="cs-live-dot"></span>Read-only evidence console</div></div>',
+    unsafe_allow_html=True,
+)
+PAGE = st.sidebar.radio("Primary navigation", NAVIGATION, label_visibility="collapsed")
+st.sidebar.divider()
+SELECTED_RUN_ID = st.sidebar.selectbox("Evidence run", options=list(run_by_id), format_func=lambda run_id: run_labels[run_id])
+SAMPLE_LIMIT = st.sidebar.slider("Telemetry window", 25, 1_000, 300, 25)
+LIVE_REFRESH = st.sidebar.toggle("Refresh telemetry", value=False)
+if st.sidebar.button("Reload run index", width="stretch"):
+    st.rerun()
+st.sidebar.divider()
+st.sidebar.caption("Database")
+st.sidebar.code(str(DATABASE_PATH), language=None)
+
+SELECTED_RUN = run_by_id[SELECTED_RUN_ID]
+render_header(PAGE, SELECTED_RUN)
+
+
+@st.fragment(run_every=2.0 if LIVE_REFRESH else None)
+def render_page() -> None:
+    latest = load_latest_telemetry(DATABASE_PATH, SELECTED_RUN_ID)
+    history = load_telemetry_history(DATABASE_PATH, SELECTED_RUN_ID, SAMPLE_LIMIT)
+    events = load_recent_events(DATABASE_PATH, SELECTED_RUN_ID, limit=200)
+    results = load_results(DATABASE_PATH, SELECTED_RUN_ID)
+    if PAGE == "Overview":
+        render_overview(SELECTED_RUN, latest, events)
+    elif PAGE == "Topology":
+        render_topology(latest)
+    elif PAGE == "Telemetry":
+        render_telemetry(latest, history)
+    elif PAGE == "Routing":
+        render_routing(latest, events)
+    elif PAGE == "QoS":
+        render_qos(latest)
+    elif PAGE == "ANRE":
+        render_anre(SELECTED_RUN, latest, events)
+    elif PAGE == "Experiments":
+        render_experiments()
+    elif PAGE == "Events":
+        render_events(events)
+    elif PAGE == "System":
+        render_system(SELECTED_RUN, latest, results)
+
+
+render_page()
+st.markdown(
+    '<p class="cs-caption" style="margin-top:1.5rem">CampusShield · Stored evidence only · '
+    'Refresh is disabled by default for stable project demonstrations.</p>',
+    unsafe_allow_html=True,
+)
