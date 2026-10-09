@@ -46,7 +46,7 @@
       "kind": "button",
       "refersTo": "button-secondary",
       "description": "Read-only dashboard action with compact NOC geometry.",
-      "html": "<button class=\"ds-btn-secondary\">Reload run index</button>",
+      "html": "<button class=\"ds-btn-secondary\">Reload evidence</button>",
       "css": ".ds-btn-secondary { min-height:36px; padding:.5rem .75rem; border-radius:4px; background:var(--cs-panel-2, #102436); color:var(--cs-text, #f4f7fa); border:1px solid var(--cs-line-strong, #355066); font:600 .78rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-btn-secondary:hover { border-color:var(--cs-cyan, #38bdf8); color:#e7f7ff; } .ds-btn-secondary:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
     },
     {
@@ -54,15 +54,15 @@
       "kind": "nav",
       "refersTo": "navigation-item-active",
       "description": "Selected destination in the persistent navigation rail.",
-      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-active\" href=\"#\"><span class=\"ds-nav-dot\"></span>Topology</a><a class=\"ds-nav-item\" href=\"#\"><span class=\"ds-nav-dot\"></span>Telemetry</a></nav>",
-      "css": ".ds-nav { display:grid; gap:2px; width:220px; background:var(--cs-shell, #091827); padding:.5rem; } .ds-nav-item { min-height:38px; display:flex; align-items:center; gap:.55rem; padding:0 .7rem; border:1px solid transparent; border-radius:4px; color:var(--cs-text, #f4f7fa); text-decoration:none; font:600 .82rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; transition:background 120ms ease-out, border-color 120ms ease-out; } .ds-nav-item:hover { background:#102436; border-color:#22384a; } .ds-nav-active { background:#12314a; border-color:#275475; color:#d9f3ff; font-weight:650; } .ds-nav-dot { width:14px; height:14px; border-radius:50%; border:1px solid var(--cs-line-strong, #355066); } .ds-nav-active .ds-nav-dot { border:4px solid var(--cs-cyan, #38bdf8); background:#d9f3ff; } .ds-nav-item:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-active\" href=\"#\">Overview</a><a class=\"ds-nav-item\" href=\"#\">Topology</a></nav>",
+      "css": ".ds-nav { display:grid; gap:2px; width:180px; background:var(--cs-shell, #091827); } .ds-nav-item { position:relative; min-height:34px; display:flex; align-items:center; padding:0 .65rem; border:1px solid transparent; border-radius:4px; color:var(--cs-text, #f4f7fa); text-decoration:none; font:600 .78rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; transition:background 120ms ease-out, border-color 120ms ease-out; } .ds-nav-item:hover { background:#102436; border-color:#22384a; } .ds-nav-active { background:#102b40; border-color:#29475e; color:#d9f3ff; font-weight:650; } .ds-nav-active::before { content:\"\"; position:absolute; left:-1px; top:7px; bottom:7px; width:2px; border-radius:2px; background:var(--cs-cyan, #38bdf8); } .ds-nav-item:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
     },
     {
       "name": "Evidence Select",
       "kind": "input",
       "refersTo": "input",
       "description": "Compact selector for an evidence run or inspected link.",
-      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Evidence run</span><select class=\"ds-select\"><option>#21 · FAILURE_RECOVERY · COMPLETED</option></select></label>",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Run</span><select class=\"ds-select\"><option>#21 · Recovery · R3</option></select></label>",
       "css": ".ds-field { display:grid; gap:.4rem; color:var(--cs-muted, #9db0c0); font:400 .75rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-select { min-height:38px; padding:0 .7rem; border-radius:4px; background:var(--cs-panel, #0c1d2d); color:var(--cs-text, #f4f7fa); border:1px solid var(--cs-line-strong, #355066); font:400 .78rem \"Segoe UI Variable\", \"Segoe UI\", Helvetica, Arial, sans-serif; } .ds-select:hover { border-color:var(--cs-cyan, #38bdf8); } .ds-select:focus-visible { outline:2px solid var(--cs-cyan, #38bdf8); outline-offset:2px; }"
     },
     {
@@ -124,7 +124,7 @@
       { "name": "The Tonal Depth Rule", "body": "Surfaces gain hierarchy through navy tone and hairline seams; do not add floating-card shadows.", "section": "elevation" }
     ],
     "dos": [
-      "Do make the selected run or result-file provenance explicit near the page title.",
+      "Do keep run provenance in the sidebar and System view, and show result-file provenance beside the relevant experiment section without crowding page titles.",
       "Do keep topology, values, timestamps, labels, and chart states traceable to real SQLite or CSV evidence.",
       "Do pair every semantic color with a named state, label, line style, or other non-color cue.",
       "Do preserve visible keyboard focus, reduced-motion behavior, mobile access to all nine navigation destinations, and the verified small secondary-text contrast of approximately 6.32:1.",

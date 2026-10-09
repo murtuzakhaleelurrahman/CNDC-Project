@@ -69,6 +69,15 @@ def main() -> int:
             "Utilization",
         )
     )
+    checks["redundant overview copy removed"] = all(
+        text not in rendered_markup
+        for text in (
+            "Snapshot from run",
+            "Stored evidence only",
+            "Reason: Failure",
+        )
+    )
+    checks["decision reason uses panel styling"] = "Evidence note" in rendered_markup
 
     for description, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'}: {description}")

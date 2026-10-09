@@ -45,6 +45,24 @@ NAVIGATION = (
     "Experiments", "Events", "System",
 )
 
+RUN_TYPE_LABELS = {
+    "BASELINE": "Baseline",
+    "CONGESTION_ANRE_OFF": "ANRE off",
+    "CONGESTION_ANRE_ON": "ANRE on",
+    "FAILURE_RECOVERY": "Recovery",
+    "VALIDATION": "Validation",
+}
+
+
+def sidebar_run_label(run: dict[str, Any]) -> str:
+    label = RUN_TYPE_LABELS.get(str(run.get("run_type")), str(run.get("run_type", "Run")).replace("_", " ").title())
+    name = str(run.get("name") or "")
+    repetition = name.lower().rsplit("repetition ", 1)[-1] if "repetition " in name.lower() else ""
+    suffix = f" · R{repetition}" if repetition.isdigit() else ""
+    if str(run.get("status", "")).upper() != "COMPLETED":
+        suffix += f" · {str(run.get('status') or 'Unknown').title()}"
+    return f"#{run['id']} · {label}{suffix}"
+
 QOS_POLICIES = {
     "NORMAL": {"Emergency / Real-Time": 20, "Academic / Administrative": 50, "Hostel / Bulk": 30},
     "DEGRADED": {"Emergency / Real-Time": 40, "Academic / Administrative": 45, "Hostel / Bulk": 15},
@@ -143,28 +161,19 @@ def empty_state(message: str) -> None:
     st.markdown(f'<div class="cs-empty">{esc(message)}</div>', unsafe_allow_html=True)
 
 
-def render_header(page: str, run: dict[str, Any]) -> None:
-    if page == "Experiments":
-        context_label = "Evidence scope"
-        context_value = "Latest complete result files · independent of sidebar run"
-    else:
-        run_kind = "Experiment" if run["is_experimental"] else "Validation"
-        context_label = f"Selected {run_kind}"
-        context_value = f"Run #{run['id']} · {run['name']} · {run['status']}"
+def render_header(page: str) -> None:
     st.markdown(
         f"""
         <div class="cs-topbar">
           <div><h1 class="cs-title">{esc(page)}</h1>
           <p class="cs-subtitle">CampusShield Network Operations Center</p></div>
-          <div class="cs-run"><div class="cs-run-label">{esc(context_label)}</div>
-          <div class="cs-run-value">{esc(context_value)}</div></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_state_line(latest: dict[str, Any] | None, run: dict[str, Any]) -> None:
+def render_state_line(latest: dict[str, Any] | None) -> None:
     if latest is None:
         empty_state("No telemetry is stored for this run. Select another run or inspect its Events and System pages.")
         return
@@ -176,8 +185,6 @@ def render_state_line(latest: dict[str, Any] | None, run: dict[str, Any]) -> Non
           <div class="cs-state-primary"><strong>Network health</strong>
           <span class="cs-score">{esc(score)}</span>
           <span class="cs-pill {state_class(state)}">{esc(state)}</span></div>
-          <div class="cs-state-meta">Snapshot from run #{run['id']}<br>
-          {esc(format_timestamp(latest.get('timestamp_utc')))}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -309,7 +316,7 @@ def latest_decision(events: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def render_overview(run: dict[str, Any], latest: dict[str, Any] | None, events: list[dict[str, Any]]) -> None:
-    render_state_line(latest, run)
+    render_state_line(latest)
     render_measurements(latest)
     decision = latest_decision(events)
     left, right = st.columns([1.65, .75], gap="small")
@@ -329,10 +336,9 @@ def render_overview(run: dict[str, Any], latest: dict[str, Any] | None, events: 
                 ("Next hop", latest.get("route_next_hop") or "Not recorded"),
                 ("Interface", latest.get("route_interface") or "Not recorded"),
                 ("Last action", (decision or {}).get("action") or "No action recorded"),
+                ("Evidence note", (decision or {}).get("message") or "No decision reason recorded"),
             ]
             st.markdown(panel_html("Control plane", rows), unsafe_allow_html=True)
-            if decision and decision.get("message"):
-                st.markdown(f'<p class="cs-caption">Reason: {esc(decision["message"])}</p>', unsafe_allow_html=True)
     section_header("Recent operational events", "Newest first")
     render_event_stream(events, limit=6)
 
@@ -438,7 +444,7 @@ def render_qos(latest: dict[str, Any] | None) -> None:
 
 
 def render_anre(run: dict[str, Any], latest: dict[str, Any] | None, events: list[dict[str, Any]]) -> None:
-    render_state_line(latest, run)
+    render_state_line(latest)
     st.markdown(
         """
         <div class="cs-loop">
@@ -615,27 +621,28 @@ if not RUNS:
     st.stop()
 
 run_by_id = {int(run["id"]): run for run in RUNS}
-run_labels = {int(run["id"]): f"#{run['id']} · {run['run_type']} · {run['status']}" for run in RUNS}
+run_labels = {int(run["id"]): sidebar_run_label(run) for run in RUNS}
 
 st.sidebar.markdown(
     '<div class="cs-brand"><div class="cs-brand-name">CampusShield</div>'
     '<div class="cs-brand-sub">Network Operations Center</div>'
-    '<div class="cs-live"><span class="cs-live-dot"></span>Read-only evidence console</div></div>',
+    '<div class="cs-live"><span class="cs-live-dot"></span>Evidence console</div></div>'
+    '<div class="cs-side-label">Workspace</div>',
     unsafe_allow_html=True,
 )
 PAGE = st.sidebar.radio("Primary navigation", NAVIGATION, label_visibility="collapsed")
 st.sidebar.divider()
-SELECTED_RUN_ID = st.sidebar.selectbox("Evidence run", options=list(run_by_id), format_func=lambda run_id: run_labels[run_id])
-SAMPLE_LIMIT = st.sidebar.slider("Telemetry window", 25, 1_000, 300, 25)
-LIVE_REFRESH = st.sidebar.toggle("Refresh telemetry", value=False)
-if st.sidebar.button("Reload run index", width="stretch"):
+st.sidebar.markdown('<div class="cs-side-label cs-side-label-controls">Evidence</div>', unsafe_allow_html=True)
+SELECTED_RUN_ID = st.sidebar.selectbox("Run", options=list(run_by_id), format_func=lambda run_id: run_labels[run_id])
+SAMPLE_LIMIT = int(st.sidebar.number_input(
+    "History samples", min_value=25, max_value=1_000, value=300, step=25,
+))
+LIVE_REFRESH = st.sidebar.toggle("Live refresh", value=False)
+if st.sidebar.button("Reload evidence", width="stretch"):
     st.rerun()
-st.sidebar.divider()
-st.sidebar.caption("Database")
-st.sidebar.code(str(DATABASE_PATH), language=None)
 
 SELECTED_RUN = run_by_id[SELECTED_RUN_ID]
-render_header(PAGE, SELECTED_RUN)
+render_header(PAGE)
 
 
 @st.fragment(run_every=2.0 if LIVE_REFRESH else None)
@@ -665,8 +672,3 @@ def render_page() -> None:
 
 
 render_page()
-st.markdown(
-    '<p class="cs-caption" style="margin-top:1.5rem">CampusShield · Stored evidence only · '
-    'Refresh is disabled by default for stable project demonstrations.</p>',
-    unsafe_allow_html=True,
-)

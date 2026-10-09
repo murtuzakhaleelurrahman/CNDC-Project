@@ -167,9 +167,9 @@ The palette is a cool midnight infrastructure field with restrained cyan interac
 
 ## Layout
 
-The desktop frame uses a persistent `248px` navigation rail and a fluid main canvas capped at `1540px`. Main content begins with `2rem` horizontal padding, while recurring panels use a compact `0.9rem` gap and roughly `0.75rem–1rem` internal rhythm. The overview privileges the topology canvas with an asymmetric `1.65fr / 0.75fr` evidence grid rather than equal cards.
+The desktop frame uses a persistent `272px` navigation rail and a fluid main canvas capped at `1540px`. Main content begins with `2rem` horizontal padding, while recurring panels use a compact `0.9rem` gap and roughly `0.75rem–1rem` internal rhythm. The overview privileges the topology canvas with an asymmetric `1.65fr / 0.75fr` evidence grid rather than equal cards.
 
-At `1100px`, two-column regions, run context, and state metadata stack into one column and main padding tightens to `1.1rem`. At `768px`, the sidebar becomes a visible, focusable Menu control; measurement cells reflow to two columns and the ANRE loop becomes vertical. At `480px`, main padding becomes `0.7rem`, measurements become a single column, key/value rows and event entries stack, and values align left.
+At `1100px`, two-column regions stack into one column and main padding tightens to `1.1rem`. At `768px`, measurement cells reflow to two columns and the ANRE loop becomes vertical. At `480px`, main padding becomes `0.7rem`, measurements become a single column, key/value rows and event entries stack, and values align left.
 
 **The Topology-First Rule.** When topology shares a row with supporting evidence, topology receives the larger region and remains legible before ancillary detail.
 
@@ -213,12 +213,13 @@ Geometry is tight and technical. Interactive controls use gently squared `4px` c
 ### Inputs / Fields
 
 - **Style:** Evidence Panel fill, Strong Border, compact `4px` corners, and readable white values.
+- **History input:** Use a direct bounded number field (`25–1000`, step `25`) with keyboard entry and compact decrement/increment controls; do not use a precision-hostile slider.
 - **Focus:** Global cyan focus outline; selection fill is a deeper route cyan.
 - **Disabled:** Retains legible secondary text and never implies live control over the read-only dashboard.
 
 ### Navigation
 
-The `248px` rail carries nine plain-language destinations in `38px` rows. Hover adds a raised navy field and subtle border; active navigation uses a deeper blue field, brighter text, heavier weight, and a filled cyan radio marker. At mobile widths the rail is opened by a visible, keyboard-focusable Menu control.
+The `272px` rail separates `Workspace` navigation from compact `Evidence` controls. Nine plain-language destinations use full-width `34px` targets without exposed radio controls; hover adds a raised navy field and subtle border, while the active destination uses a deeper blue field and a two-pixel cyan edge. Run labels are human-readable and compact (for example, `#21 · Recovery · R3`), and implementation paths remain in the System view rather than the navigation shell. A permanently visible close chevron collapses the open rail. When collapsed, the rail reserves zero layout width so the `1540px` canvas remains mathematically centered; a visible, keyboard-focusable `Menu` control restores it.
 
 ### Measurement Band
 
@@ -236,7 +237,7 @@ Unavailable evidence appears as muted copy inside a lightly tinted panel with a 
 
 ### Do:
 
-- **Do** make the selected run or result-file provenance explicit near the page title.
+- **Do** keep run provenance in the sidebar and System view, and expose result-file provenance beside the relevant experiment section without crowding page titles.
 - **Do** keep topology, values, timestamps, labels, and chart states traceable to real SQLite or CSV evidence.
 - **Do** pair every semantic color with a named state, label, line style, or other non-color cue.
 - **Do** preserve visible keyboard focus, reduced-motion behavior, mobile access to all nine navigation destinations, and the verified small secondary-text contrast of approximately `6.32:1`.
