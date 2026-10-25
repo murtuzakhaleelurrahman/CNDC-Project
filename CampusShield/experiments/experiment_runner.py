@@ -53,6 +53,15 @@ from database.storage import (  # noqa: E402
     EventRecord,
     TelemetryRecord,
 )
+from experiments.congestion_design import (  # noqa: E402
+    SCENARIOS,
+    TrafficPhase,
+    build_phase_plan,
+    initial_policy_for_scenario,
+    queue_counter_delta,
+    scenario_order_for_repetition,
+)
+from experiments.statistics_utils import describe_95  # noqa: E402
 from telemetry.telemetry_worker import collect_snapshot  # noqa: E402
 from topology.campus_topology import (  # noqa: E402
     CORE_BANDWIDTH_MBPS,
@@ -109,14 +118,26 @@ def parse_args() -> argparse.Namespace:
     congestion.add_argument(
         "--duration",
         type=float,
+        default=30.0,
+        help="congested phase duration per scenario in seconds (default: 30)",
+    )
+    congestion.add_argument(
+        "--healthy-duration",
+        type=float,
+        default=10.0,
+        help="healthy pre-congestion phase in seconds (default: 10)",
+    )
+    congestion.add_argument(
+        "--recovery-duration",
+        type=float,
         default=20.0,
-        help="measurement duration per scenario in seconds (default: 20)",
+        help="post-congestion recovery phase in seconds (default: 20)",
     )
     congestion.add_argument(
         "--repetitions",
         type=int,
-        default=3,
-        help="paired OFF/ON repetitions (default: 3)",
+        default=10,
+        help="matched three-arm repetitions (default: 10)",
     )
     congestion.add_argument(
         "--database",
@@ -130,8 +151,8 @@ def parse_args() -> argparse.Namespace:
     failure.add_argument(
         "--repetitions",
         type=int,
-        default=3,
-        help="fresh-topology repetitions (default: 3)",
+        default=10,
+        help="fresh-topology repetitions (default: 10)",
     )
     failure.add_argument(
         "--timeout",
@@ -146,6 +167,25 @@ def parse_args() -> argparse.Namespace:
         help="SQLite database path",
     )
     return parser.parse_args()
+
+
+def _queue_evidence_fields(snapshot: dict[str, Any]) -> dict[str, int]:
+    """Flatten per-class queue evidence for human-readable experiment CSVs."""
+    fields: dict[str, int] = {
+        "probe_dscp_value": int(snapshot["probe"].get("dscp_value", 0)),
+    }
+    for class_name in ("emergency", "academic", "bulk"):
+        stats = snapshot.get("qos_classes", {}).get(class_name, {})
+        for metric in (
+            "sent_bytes",
+            "sent_packets",
+            "dropped_packets",
+            "overlimits",
+            "backlog_bytes",
+            "backlog_packets",
+        ):
+            fields[f"{class_name}_{metric}"] = int(stats.get(metric, 0))
+    return fields
 
 
 def _parse_udp_result(raw_output: str) -> dict[str, float]:
@@ -374,6 +414,7 @@ def run_baseline(duration_seconds: float, database_path: Path) -> bool:
                     "nhs": record.nhs,
                     "route_next_hop": record.route_next_hop,
                     "route_interface": record.route_interface,
+                    **_queue_evidence_fields(snapshot),
                 }
             )
 
@@ -475,14 +516,20 @@ def run_baseline(duration_seconds: float, database_path: Path) -> bool:
             database.close()
 
 
-def _start_congestion_flows(
-    nodes: dict[str, Any], duration_seconds: float
+def _start_phase_flows(
+    nodes: dict[str, Any], phase: TrafficPhase
 ) -> list[tuple[str, str, Any]]:
-    profiles = (
-        ("emergency", "UDP", 6201, 184),
-        ("academic", "TCP", 6202, 72),
-        ("bulk", "TCP", 6203, 32),
-    )
+    port_base = {"HEALTHY": 6200, "CONGESTION": 6300, "RECOVERY": 6400}[
+        phase.name
+    ]
+    profiles = [("emergency", "UDP", port_base + 1, 184)]
+    if phase.competing_tcp:
+        profiles.extend(
+            [
+                ("academic", "TCP", port_base + 2, 72),
+                ("bulk", "TCP", port_base + 3, 32),
+            ]
+        )
     for _, _, port, _ in profiles:
         nodes["admin1"].cmd(
             f"iperf3 -s -1 -D -B 10.10.20.10 -p {port}"
@@ -490,19 +537,19 @@ def _start_congestion_flows(
     time.sleep(0.5)
 
     processes = []
-    flow_duration = str(int(duration_seconds) + 2)
+    flow_duration = str(max(3, int(phase.duration_seconds) + 1))
     for name, protocol, port, tos_byte in profiles:
         command = [
             "iperf3", "-c", "10.10.20.10", "-p", str(port),
             "-t", flow_duration, "-O", "1", "-S", str(tos_byte), "-J",
         ]
         if protocol == "UDP":
-            command.extend(["-u", "-b", "60M"])
+            command.extend(["-u", "-b", f"{phase.emergency_udp_mbps}M"])
         processes.append((name, protocol, nodes["emergency1"].popen(command)))
     return processes
 
 
-def _finish_congestion_flows(
+def _finish_phase_flows(
     processes: list[tuple[str, str, Any]],
 ) -> dict[str, dict[str, float]]:
     measurements: dict[str, dict[str, float]] = {}
@@ -520,10 +567,12 @@ def _run_congestion_scenario(
     baseline_run_id: int,
     group_id: str,
     repetition: int,
-    anre_enabled: bool,
-    duration_seconds: float,
+    scenario: str,
+    phase_plan: tuple[TrafficPhase, ...],
 ) -> dict[str, Any]:
-    scenario = "ANRE_ON" if anre_enabled else "ANRE_OFF"
+    if scenario not in SCENARIOS:
+        raise ValueError(f"Unknown congestion scenario: {scenario}")
+    anre_enabled = scenario == "ANRE_ON"
     net = None
     nodes: dict[str, Any] = {}
     database: CampusShieldDatabase | None = None
@@ -537,7 +586,8 @@ def _run_congestion_scenario(
             is_experimental=True,
             notes=(
                 f"comparison_group={group_id}; repetition={repetition}; "
-                f"baseline_run_id={baseline_run_id}; identical workload="
+                f"baseline_run_id={baseline_run_id}; three_phase_workload="
+                "healthy, congestion, recovery; congestion workload="
                 "60 Mbps emergency UDP plus academic and bulk TCP"
             ),
         )
@@ -550,7 +600,9 @@ def _run_congestion_scenario(
                 metadata={
                     "comparison_group": group_id,
                     "repetition": repetition,
-                    "duration_seconds": duration_seconds,
+                    "phase_durations": {
+                        phase.name: phase.duration_seconds for phase in phase_plan
+                    },
                     "baseline_run_id": baseline_run_id,
                 },
             ),
@@ -569,80 +621,131 @@ def _run_congestion_scenario(
             raise RuntimeError("The initial QoS policy did not validate")
 
         machine = AnreStateMachine()
-        current_policy = "NORMAL"
+        current_policy = initial_policy_for_scenario(scenario)
+        if current_policy != "NORMAL":
+            if not update_qos_policy(nodes, current_policy):
+                raise RuntimeError(
+                    f"Could not apply the {scenario} fixed QoS policy"
+                )
+            if not validate_qos_policy(nodes, current_policy):
+                raise RuntimeError(
+                    f"The {scenario} fixed QoS policy did not validate"
+                )
         controller_response_seconds: float | None = None
+        recovery_to_normal_seconds: float | None = None
         rows: list[dict[str, Any]] = []
-        scores: list[float] = []
-        processes = _start_congestion_flows(nodes, duration_seconds)
-        started = time.monotonic()
-        time.sleep(0.5)
+        phase_flow_metrics: dict[str, dict[str, dict[str, float]]] = {}
+        scenario_started = time.monotonic()
+        congestion_started: float | None = None
+        recovery_started: float | None = None
 
-        while time.monotonic() - started < duration_seconds:
-            snapshot = collect_snapshot(
-                nodes=nodes,
-                router_name="r1",
-                source_host="emergency1",
-                interface="r1-eth0",
-                target_ip="10.10.20.10",
-                capacity_mbps=CORE_BANDWIDTH_MBPS,
-                interval_seconds=0.75,
+        for phase in phase_plan:
+            phase_started = time.monotonic()
+            if phase.name == "CONGESTION":
+                congestion_started = phase_started
+            elif phase.name == "RECOVERY":
+                recovery_started = phase_started
+            database.log_event(
+                run_id,
+                EventRecord(
+                    component="EXPERIMENT",
+                    event_type="TRAFFIC_PHASE_START",
+                    message=f"{scenario} entered {phase.name.lower()} phase",
+                    metadata={
+                        "phase": phase.name,
+                        "duration_seconds": phase.duration_seconds,
+                        "emergency_udp_mbps": phase.emergency_udp_mbps,
+                        "competing_tcp": phase.competing_tcp,
+                    },
+                ),
             )
-            metrics = HealthMetrics(
-                rtt_ms=snapshot["probe"]["average_rtt_ms"],
-                loss_percent=snapshot["probe"]["packet_loss_percent"],
-                jitter_ms=snapshot["probe"]["jitter_ms"],
-                bandwidth_used_mbps=snapshot["interface"]["tx_mbps"],
-            )
-            score = calculate_health_score(metrics, thresholds)
-            scores.append(score.nhs)
-            state_name = "DISABLED"
-            if anre_enabled:
-                decision = machine.evaluate_score(score.nhs)
-                state_name = decision.current_state.value
-                if decision.changed:
-                    current_policy = state_name
-                    if not update_qos_policy(nodes, current_policy):
-                        raise RuntimeError(
-                            f"Could not apply {current_policy} QoS policy"
-                        )
-                    if not validate_qos_policy(nodes, current_policy):
-                        raise RuntimeError(
-                            f"The {current_policy} QoS policy did not validate"
-                        )
-                    response = time.monotonic() - started
-                    if controller_response_seconds is None:
-                        controller_response_seconds = response
-                    database.log_event(
-                        run_id,
-                        EventRecord(
-                            component="ANRE",
-                            event_type="STATE_TRANSITION",
-                            message=(
-                                f"ANRE changed {decision.previous_state.value} "
-                                f"to {decision.current_state.value}"
+            processes = _start_phase_flows(nodes, phase)
+            time.sleep(0.5)
+
+            while time.monotonic() - phase_started < phase.duration_seconds:
+                snapshot = collect_snapshot(
+                    nodes=nodes,
+                    router_name="r1",
+                    source_host="emergency1",
+                    interface="r1-eth0",
+                    target_ip="10.10.20.10",
+                    capacity_mbps=CORE_BANDWIDTH_MBPS,
+                    interval_seconds=0.75,
+                )
+                metrics = HealthMetrics(
+                    rtt_ms=snapshot["probe"]["average_rtt_ms"],
+                    loss_percent=snapshot["probe"]["packet_loss_percent"],
+                    jitter_ms=snapshot["probe"]["jitter_ms"],
+                    bandwidth_used_mbps=snapshot["interface"]["tx_mbps"],
+                )
+                score = calculate_health_score(metrics, thresholds)
+                state_name = "DISABLED"
+                if anre_enabled:
+                    decision = machine.evaluate_score(score.nhs)
+                    state_name = decision.current_state.value
+                    if decision.changed:
+                        current_policy = state_name
+                        if not update_qos_policy(nodes, current_policy):
+                            raise RuntimeError(
+                                f"Could not apply {current_policy} QoS policy"
+                            )
+                        if not validate_qos_policy(nodes, current_policy):
+                            raise RuntimeError(
+                                f"The {current_policy} QoS policy did not validate"
+                            )
+                        now = time.monotonic()
+                        response: float | None = None
+                        if (
+                            phase.name == "CONGESTION"
+                            and controller_response_seconds is None
+                            and decision.current_state.value != "NORMAL"
+                            and congestion_started is not None
+                        ):
+                            controller_response_seconds = now - congestion_started
+                            response = controller_response_seconds
+                        if (
+                            phase.name == "RECOVERY"
+                            and decision.current_state.value == "NORMAL"
+                            and recovery_to_normal_seconds is None
+                            and recovery_started is not None
+                        ):
+                            recovery_to_normal_seconds = now - recovery_started
+                        database.log_event(
+                            run_id,
+                            EventRecord(
+                                component="ANRE",
+                                event_type="STATE_TRANSITION",
+                                message=(
+                                    f"ANRE changed {decision.previous_state.value} "
+                                    f"to {decision.current_state.value} during "
+                                    f"{phase.name.lower()}"
+                                ),
+                                previous_state=decision.previous_state.value,
+                                current_state=decision.current_state.value,
+                                action="APPLY_QOS",
+                                old_value=decision.previous_state.value,
+                                new_value=current_policy,
+                                metadata={
+                                    "phase": phase.name,
+                                    "response_seconds": response,
+                                    "nhs": score.nhs,
+                                },
                             ),
-                            previous_state=decision.previous_state.value,
-                            current_state=decision.current_state.value,
-                            action="APPLY_QOS",
-                            old_value=decision.previous_state.value,
-                            new_value=current_policy,
-                            metadata={"response_seconds": response, "nhs": score.nhs},
-                        ),
-                    )
+                        )
 
-            record = TelemetryRecord.from_snapshot(
-                snapshot,
-                nhs=score.nhs,
-                anre_state=state_name,
-                link_name="R1-R2",
-                link_health=score.nhs,
-                qos_policy=current_policy,
-            )
-            database.log_telemetry(run_id, record)
-            elapsed = time.monotonic() - started
-            rows.append(
-                {
-                    "elapsed_seconds": elapsed,
+                record = TelemetryRecord.from_snapshot(
+                    snapshot,
+                    nhs=score.nhs,
+                    anre_state=state_name,
+                    link_name="R1-R2",
+                    link_health=score.nhs,
+                    qos_policy=current_policy,
+                )
+                database.log_telemetry(run_id, record)
+                row = {
+                    "elapsed_seconds": time.monotonic() - scenario_started,
+                    "phase_elapsed_seconds": time.monotonic() - phase_started,
+                    "phase": phase.name,
                     "timestamp_utc": record.timestamp_utc,
                     "scenario": scenario,
                     "repetition": repetition,
@@ -654,37 +757,89 @@ def _run_congestion_scenario(
                     "nhs": record.nhs,
                     "anre_state": record.anre_state,
                     "qos_policy": record.qos_policy,
+                    **_queue_evidence_fields(snapshot),
                 }
-            )
-            info(
-                f"{scenario} sample {len(rows)}: NHS={score.nhs:.2f}, "
-                f"state={state_name}, policy={current_policy}, "
-                f"RTT={record.rtt_ms:.2f} ms, util={record.utilization_percent:.1f}%\n"
+                rows.append(row)
+                info(
+                    f"{scenario} {phase.name} sample {len(rows)}: "
+                    f"NHS={score.nhs:.2f}, state={state_name}, "
+                    f"policy={current_policy}, RTT={record.rtt_ms:.2f} ms, "
+                    f"util={record.utilization_percent:.1f}%\n"
+                )
+
+            phase_flow_metrics[phase.name] = _finish_phase_flows(processes)
+            processes = []
+            database.log_event(
+                run_id,
+                EventRecord(
+                    component="EXPERIMENT",
+                    event_type="TRAFFIC_PHASE_COMPLETE",
+                    message=f"{scenario} completed {phase.name.lower()} phase",
+                    metadata={"phase": phase.name},
+                ),
             )
 
-        flow_metrics = _finish_congestion_flows(processes)
-        processes = []
+        congestion_rows = [row for row in rows if row["phase"] == "CONGESTION"]
+        healthy_rows = [row for row in rows if row["phase"] == "HEALTHY"]
+        recovery_rows = [row for row in rows if row["phase"] == "RECOVERY"]
+        if not congestion_rows or not healthy_rows or not recovery_rows:
+            raise RuntimeError("One or more traffic phases produced no telemetry")
+
+        def phase_mean(phase_rows: list[dict[str, Any]], field: str) -> float:
+            return sum(float(row[field]) for row in phase_rows) / len(phase_rows)
+
+        flow_metrics = phase_flow_metrics["CONGESTION"]
+        final_state = machine.state.value if anre_enabled else "DISABLED"
         summary: dict[str, Any] = {
             "group_id": group_id,
             "repetition": repetition,
             "scenario": scenario,
             "run_id": run_id,
             "sample_count": len(rows),
-            "mean_rtt_ms": sum(row["rtt_ms"] for row in rows) / len(rows),
-            "mean_probe_loss_percent": sum(
-                row["packet_loss_percent"] for row in rows
-            ) / len(rows),
-            "mean_probe_jitter_ms": sum(row["jitter_ms"] for row in rows) / len(rows),
-            "mean_utilization_percent": sum(
-                row["utilization_percent"] for row in rows
-            ) / len(rows),
-            "mean_nhs": sum(scores) / len(scores),
+            "healthy_sample_count": len(healthy_rows),
+            "congestion_sample_count": len(congestion_rows),
+            "recovery_sample_count": len(recovery_rows),
+            "mean_rtt_ms": phase_mean(congestion_rows, "rtt_ms"),
+            "mean_probe_loss_percent": phase_mean(
+                congestion_rows, "packet_loss_percent"
+            ),
+            "mean_probe_jitter_ms": phase_mean(congestion_rows, "jitter_ms"),
+            "mean_utilization_percent": phase_mean(
+                congestion_rows, "utilization_percent"
+            ),
+            "mean_nhs": phase_mean(congestion_rows, "nhs"),
+            "healthy_mean_nhs": phase_mean(healthy_rows, "nhs"),
+            "recovery_mean_nhs": phase_mean(recovery_rows, "nhs"),
+            "recovery_nhs_change": (
+                phase_mean(recovery_rows, "nhs")
+                - phase_mean(congestion_rows, "nhs")
+            ),
             "emergency_throughput_mbps": flow_metrics["emergency"]["throughput_mbps"],
             "emergency_udp_loss_percent": flow_metrics["emergency"]["packet_loss_percent"],
             "emergency_udp_jitter_ms": flow_metrics["emergency"]["jitter_ms"],
             "academic_throughput_mbps": flow_metrics["academic"]["throughput_mbps"],
             "bulk_throughput_mbps": flow_metrics["bulk"]["throughput_mbps"],
             "controller_response_seconds": controller_response_seconds,
+            "recovery_to_normal_seconds": recovery_to_normal_seconds,
+            "emergency_queue_drops_congestion": queue_counter_delta(
+                congestion_rows, "emergency_dropped_packets"
+            ),
+            "academic_queue_drops_congestion": queue_counter_delta(
+                congestion_rows, "academic_dropped_packets"
+            ),
+            "bulk_queue_drops_congestion": queue_counter_delta(
+                congestion_rows, "bulk_dropped_packets"
+            ),
+            "peak_emergency_backlog_bytes": max(
+                int(row["emergency_backlog_bytes"]) for row in congestion_rows
+            ),
+            "healthy_emergency_throughput_mbps": phase_flow_metrics["HEALTHY"][
+                "emergency"
+            ]["throughput_mbps"],
+            "recovery_emergency_throughput_mbps": phase_flow_metrics["RECOVERY"][
+                "emergency"
+            ]["throughput_mbps"],
+            "final_anre_state": final_state,
             "final_policy": current_policy,
         }
 
@@ -694,12 +849,22 @@ def _run_congestion_scenario(
             "mean_probe_jitter_ms": "ms",
             "mean_utilization_percent": "percent",
             "mean_nhs": "score",
+            "healthy_mean_nhs": "score",
+            "recovery_mean_nhs": "score",
+            "recovery_nhs_change": "score",
             "emergency_throughput_mbps": "Mbps",
             "emergency_udp_loss_percent": "percent",
             "emergency_udp_jitter_ms": "ms",
             "academic_throughput_mbps": "Mbps",
             "bulk_throughput_mbps": "Mbps",
             "controller_response_seconds": "seconds",
+            "recovery_to_normal_seconds": "seconds",
+            "emergency_queue_drops_congestion": "packets",
+            "academic_queue_drops_congestion": "packets",
+            "bulk_queue_drops_congestion": "packets",
+            "peak_emergency_backlog_bytes": "bytes",
+            "healthy_emergency_throughput_mbps": "Mbps",
+            "recovery_emergency_throughput_mbps": "Mbps",
         }
         for metric_name, unit in result_units.items():
             value = summary[metric_name]
@@ -732,7 +897,12 @@ def _run_congestion_scenario(
                 component="EXPERIMENT",
                 event_type="CONGESTION_SCENARIO_COMPLETE",
                 message=f"Congestion scenario {scenario} completed",
-                metadata={"sample_csv": str(sample_path), "final_policy": current_policy},
+                metadata={
+                    "sample_csv": str(sample_path),
+                    "final_policy": current_policy,
+                    "final_anre_state": final_state,
+                    "recovery_to_normal_seconds": recovery_to_normal_seconds,
+                },
             ),
         )
         database.finish_run(run_id, "COMPLETED")
@@ -793,14 +963,33 @@ def _save_congestion_comparison(
         ("mean_nhs", "Network Health Score", "Score"),
         ("bulk_throughput_mbps", "Bulk throughput", "Mbps"),
     )
-    colors = {"ANRE_OFF": "#94a3b8", "ANRE_ON": "#0f766e"}
+    colors = {
+        "ANRE_OFF": "#94a3b8",
+        "STATIC_TUNED": "#2563eb",
+        "ANRE_ON": "#0f766e",
+    }
+    labels = {
+        "ANRE_OFF": "Basic static",
+        "STATIC_TUNED": "Tuned static",
+        "ANRE_ON": "Adaptive ANRE",
+    }
     figure, axes = plt.subplots(2, 3, figsize=(13, 7), constrained_layout=True)
-    figure.suptitle(f"CampusShield Experiment 2 - ANRE OFF vs ON ({group_id})")
+    figure.suptitle(
+        f"CampusShield Experiment 2 - Three-arm congestion comparison ({group_id})"
+    )
     for axis, (metric, title, unit) in zip(axes.flat, metrics):
         grouped = frame.groupby("scenario")[metric]
-        order = [scenario for scenario in ("ANRE_OFF", "ANRE_ON") if scenario in grouped.groups]
-        means = [grouped.get_group(scenario).mean() for scenario in order]
-        axis.bar(order, means, color=[colors[item] for item in order])
+        order = [scenario for scenario in SCENARIOS if scenario in grouped.groups]
+        statistics = [describe_95(grouped.get_group(scenario).dropna()) for scenario in order]
+        means = [item.mean for item in statistics]
+        errors = [item.ci95_high - item.mean for item in statistics]
+        axis.bar(
+            [labels[item] for item in order],
+            means,
+            yerr=errors,
+            capsize=4,
+            color=[colors[item] for item in order],
+        )
         for index, scenario in enumerate(order):
             values = grouped.get_group(scenario).tolist()
             axis.scatter([index] * len(values), values, color="#111827", s=18, zorder=3)
@@ -812,26 +1001,31 @@ def _save_congestion_comparison(
 
 
 def run_congestion_comparison(
-    duration_seconds: float,
+    congestion_seconds: float,
+    healthy_seconds: float,
+    recovery_seconds: float,
     repetitions: int,
     database_path: Path,
 ) -> bool:
     if os.geteuid() != 0:
         raise PermissionError("Mininet experiments must be run with sudo")
-    if duration_seconds < 8:
-        raise ValueError("Congestion duration must be at least 8 seconds")
     if repetitions < 1:
         raise ValueError("Repetitions must be at least 1")
+    phase_plan = build_phase_plan(
+        healthy_seconds, congestion_seconds, recovery_seconds
+    )
 
     baseline_run_id, thresholds = _latest_baseline_thresholds(database_path)
     group_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     info(
         f"*** Experiment 2 group {group_id}; baseline run {baseline_run_id}; "
-        f"{repetitions} paired repetition(s)\n"
+        f"{repetitions} matched three-arm repetition(s); phases="
+        f"{healthy_seconds:.0f}s healthy, {congestion_seconds:.0f}s congestion, "
+        f"{recovery_seconds:.0f}s recovery\n"
     )
     summaries: list[dict[str, Any]] = []
     for repetition in range(1, repetitions + 1):
-        for anre_enabled in (False, True):
+        for scenario in scenario_order_for_repetition(repetition):
             summaries.append(
                 _run_congestion_scenario(
                     database_path=database_path,
@@ -839,8 +1033,8 @@ def run_congestion_comparison(
                     baseline_run_id=baseline_run_id,
                     group_id=group_id,
                     repetition=repetition,
-                    anre_enabled=anre_enabled,
-                    duration_seconds=duration_seconds,
+                    scenario=scenario,
+                    phase_plan=phase_plan,
                 )
             )
 
@@ -848,13 +1042,17 @@ def run_congestion_comparison(
     frame = pd.DataFrame(summaries)
     means = frame.groupby("scenario").mean(numeric_only=True)
     info("\n*** Experiment 2 measured comparison\n")
-    for scenario in ("ANRE_OFF", "ANRE_ON"):
+    for scenario in SCENARIOS:
         row = means.loc[scenario]
+        nhs_ci = describe_95(
+            frame.loc[frame["scenario"] == scenario, "mean_nhs"]
+        )
         info(
             f"{scenario}: emergency={row['emergency_throughput_mbps']:.2f} Mbps, "
             f"loss={row['emergency_udp_loss_percent']:.2f}%, "
             f"jitter={row['emergency_udp_jitter_ms']:.3f} ms, "
-            f"RTT={row['mean_rtt_ms']:.3f} ms, NHS={row['mean_nhs']:.2f}, "
+            f"RTT={row['mean_rtt_ms']:.3f} ms, NHS={row['mean_nhs']:.2f} "
+            f"(95% CI {nhs_ci.ci95_low:.2f}-{nhs_ci.ci95_high:.2f}), "
             f"bulk={row['bulk_throughput_mbps']:.2f} Mbps\n"
         )
     info(f"Comparison CSV: {csv_path}\n")
@@ -1291,7 +1489,11 @@ def main() -> int:
             return 0 if run_baseline(args.duration, args.database) else 1
         if args.experiment == "congestion":
             return 0 if run_congestion_comparison(
-                args.duration, args.repetitions, args.database
+                args.duration,
+                args.healthy_duration,
+                args.recovery_duration,
+                args.repetitions,
+                args.database,
             ) else 1
         if args.experiment == "failure":
             return 0 if run_failure_experiment(

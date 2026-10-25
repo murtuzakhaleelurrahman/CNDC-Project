@@ -22,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from dashboard.queries import (  # noqa: E402
     load_latest_telemetry,
+    load_qos_class_history,
     load_recent_events,
     load_results,
     load_runs,
@@ -48,6 +49,7 @@ NAVIGATION = (
 RUN_TYPE_LABELS = {
     "BASELINE": "Baseline",
     "CONGESTION_ANRE_OFF": "ANRE off",
+    "CONGESTION_STATIC_TUNED": "Tuned static",
     "CONGESTION_ANRE_ON": "ANRE on",
     "FAILURE_RECOVERY": "Recovery",
     "VALIDATION": "Validation",
@@ -411,7 +413,10 @@ def render_routing(latest: dict[str, Any] | None, events: list[dict[str, Any]]) 
     render_event_stream(route_events, limit=20)
 
 
-def render_qos(latest: dict[str, Any] | None) -> None:
+def render_qos(
+    latest: dict[str, Any] | None,
+    queue_history: list[dict[str, Any]],
+) -> None:
     policy_name = str((latest or {}).get("qos_policy") or (latest or {}).get("anre_state") or "").upper()
     rates = QOS_POLICIES.get(policy_name)
     if rates is None:
@@ -424,7 +429,13 @@ def render_qos(latest: dict[str, Any] | None) -> None:
     st.markdown(panel_html(
         "QoS policy",
         [("Policy", policy_name), ("Evidence", observed_label), ("Scheduler", "HTB + FQ-CoDel"),
-         ("Classification", "DSCP EF / AF21 / CS1"), ("Core capacity", "100 Mbps")],
+         ("Classification", "DSCP EF / AF21 / CS1"),
+         ("Service probe", (
+             f"EF (DSCP {latest['probe_dscp_value']})"
+             if latest and latest.get("probe_dscp_value") == 46
+             else "Not recorded for this run"
+         )),
+         ("Core capacity", "100 Mbps")],
     ), unsafe_allow_html=True)
     frame = pd.DataFrame({"Traffic class": list(rates), "Allocation (Mbps)": list(rates.values())})
     figure = px.bar(
@@ -441,6 +452,84 @@ def render_qos(latest: dict[str, Any] | None) -> None:
     section_header("Policy matrix", "Controller-defined allocations; values are not synthesized")
     matrix = pd.DataFrame(QOS_POLICIES).T.reset_index(names="Policy")
     st.dataframe(matrix, width="stretch", hide_index=True)
+    section_header(
+        "Kernel queue evidence",
+        "Cumulative tc counters and instantaneous backlog from the selected run",
+    )
+    if not queue_history:
+        empty_state(
+            "This run predates per-class queue telemetry or did not use the QoS hierarchy."
+        )
+        return
+    queues = pd.DataFrame(queue_history)
+    queues["timestamp_utc"] = pd.to_datetime(queues["timestamp_utc"], utc=True)
+    latest_queues = (
+        queues.sort_values("timestamp_utc")
+        .groupby("class_name", as_index=False)
+        .tail(1)
+        .copy()
+    )
+    labels = {
+        "emergency": "Emergency (EF)",
+        "academic": "Academic (AF21)",
+        "bulk": "Bulk (CS1)",
+    }
+    latest_queues["Traffic class"] = latest_queues["class_name"].map(labels)
+    evidence = latest_queues.rename(columns={
+        "sent_packets": "Packets sent",
+        "dropped_packets": "Packets dropped",
+        "overlimits": "Overlimits",
+        "backlog_bytes": "Backlog (bytes)",
+        "backlog_packets": "Backlog (packets)",
+    })
+    st.dataframe(
+        evidence[[
+            "Traffic class", "dscp_value", "Packets sent", "Packets dropped",
+            "Overlimits", "Backlog (bytes)", "Backlog (packets)",
+        ]].rename(columns={"dscp_value": "DSCP"}),
+        width="stretch",
+        hide_index=True,
+    )
+    drop_chart = px.bar(
+        evidence,
+        x="Traffic class",
+        y="Packets dropped",
+        color="Traffic class",
+        color_discrete_map={
+            "Emergency (EF)": COLORS["red"],
+            "Academic (AF21)": COLORS["cyan"],
+            "Bulk (CS1)": COLORS["blue"],
+        },
+        title="Cumulative queue drops by traffic class",
+    )
+    drop_chart.update_layout(showlegend=False)
+    st.plotly_chart(
+        style_figure(drop_chart, 300),
+        width="stretch",
+        config={"displaylogo": False},
+    )
+    backlog = px.line(
+        queues,
+        x="timestamp_utc",
+        y="backlog_bytes",
+        color="class_name",
+        labels={
+            "timestamp_utc": "Time (UTC)",
+            "backlog_bytes": "Backlog (bytes)",
+            "class_name": "Traffic class",
+        },
+        color_discrete_map={
+            "emergency": COLORS["red"],
+            "academic": COLORS["cyan"],
+            "bulk": COLORS["blue"],
+        },
+        title="Queue backlog over time",
+    )
+    st.plotly_chart(
+        style_figure(backlog, 320),
+        width="stretch",
+        config={"displaylogo": False},
+    )
 
 
 def render_anre(run: dict[str, Any], latest: dict[str, Any] | None, events: list[dict[str, Any]]) -> None:
@@ -479,11 +568,21 @@ def render_anre(run: dict[str, Any], latest: dict[str, Any] | None, events: list
 def hypothesis_table(congestion: pd.DataFrame, failure: pd.DataFrame) -> pd.DataFrame:
     off = congestion[congestion["scenario"] == "ANRE_OFF"]
     on = congestion[congestion["scenario"] == "ANRE_ON"]
+    recovery_supported = (
+        on["recovery_nhs_change"].mean() > 0
+        if "recovery_nhs_change" in congestion.columns
+        else on["mean_nhs"].mean() > off["mean_nhs"].mean()
+    )
+    recovery_criterion = (
+        "ANRE NHS increases from congestion to the recovery phase"
+        if "recovery_nhs_change" in congestion.columns
+        else "Mean NHS increases with ANRE"
+    )
     checks = [
         ("H1 · RTT", on["mean_rtt_ms"].mean() < off["mean_rtt_ms"].mean(), "Mean RTT decreases with ANRE"),
         ("H2 · Packet loss", on["emergency_udp_loss_percent"].mean() < off["emergency_udp_loss_percent"].mean(), "Emergency UDP loss decreases"),
         ("H3 · Jitter", on["emergency_udp_jitter_ms"].mean() < off["emergency_udp_jitter_ms"].mean(), "Emergency UDP jitter decreases"),
-        ("H4 · NHS", on["mean_nhs"].mean() > off["mean_nhs"].mean(), "Mean NHS increases"),
+        ("H4 · Recovery", recovery_supported, recovery_criterion),
         ("H5 · QoS trade-off", on["emergency_throughput_mbps"].mean() > off["emergency_throughput_mbps"].mean() and on["bulk_throughput_mbps"].mean() < off["bulk_throughput_mbps"].mean(), "Emergency gains capacity while bulk is restricted"),
         ("H6 · Routing recovery", failure["route_after_failure"].str.contains("r1-eth1", na=False).all() and failure["route_after_restoration"].str.contains("r1-eth0", na=False).all(), "Every repetition uses backup and restores primary"),
     ]
@@ -514,7 +613,7 @@ def render_experiments() -> None:
         figure.update_traces(line_color=COLORS["green"], line_width=2)
         st.plotly_chart(style_figure(figure, 300), width="stretch", config={"displaylogo": False})
 
-    section_header("Experiment 2 · ANRE OFF versus ANRE ON", congestion_path.name if congestion_path else "No result file")
+    section_header("Experiment 2 · Three-arm adaptive comparison", congestion_path.name if congestion_path else "No result file")
     if congestion is None or congestion.empty:
         empty_state("No complete ANRE comparison CSV is available.")
     else:
@@ -524,14 +623,37 @@ def render_experiments() -> None:
             ("Emergency jitter", "emergency_udp_jitter_ms", "ms"),
             ("Mean NHS", "mean_nhs", "/100"), ("Bulk throughput", "bulk_throughput_mbps", "Mbps"),
         ]
+        optional_metrics = [
+            ("Recovery NHS change", "recovery_nhs_change", "points"),
+            ("Emergency queue drops", "emergency_queue_drops_congestion", "packets"),
+            ("Peak emergency backlog", "peak_emergency_backlog_bytes", "bytes"),
+        ]
+        comparison_metrics.extend(
+            item for item in optional_metrics if item[1] in congestion.columns
+        )
+        scenario_labels = {
+            "ANRE_OFF": "Basic static",
+            "STATIC_TUNED": "Tuned static",
+            "ANRE_ON": "Adaptive ANRE",
+        }
         long_rows = []
         for label, column, unit in comparison_metrics:
             for _, row in congestion.iterrows():
-                long_rows.append({"Metric": label, "Scenario": row["scenario"], "Repetition": str(row["repetition"]), "Value": row[column], "Unit": unit})
+                long_rows.append({"Metric": label, "Scenario": scenario_labels.get(row["scenario"], row["scenario"]), "Repetition": str(row["repetition"]), "Value": row[column], "Unit": unit})
         long_frame = pd.DataFrame(long_rows)
         selected_metric = st.selectbox("Comparison metric", [item[0] for item in comparison_metrics])
         selected = long_frame[long_frame["Metric"] == selected_metric]
-        chart = px.line(selected, x="Scenario", y="Value", color="Repetition", markers=True, category_orders={"Scenario": ["ANRE_OFF", "ANRE_ON"]}, title=f"Paired {selected_metric.lower()} results")
+        chart = px.line(
+            selected,
+            x="Scenario",
+            y="Value",
+            color="Repetition",
+            markers=True,
+            category_orders={
+                "Scenario": ["Basic static", "Tuned static", "Adaptive ANRE"]
+            },
+            title=f"Matched {selected_metric.lower()} results",
+        )
         st.plotly_chart(style_figure(chart, 340), width="stretch", config={"displaylogo": False})
 
     section_header("Experiment 3 · Physical link failure", failure_path.name if failure_path else "No result file")
@@ -551,7 +673,13 @@ def render_experiments() -> None:
         ]), unsafe_allow_html=True)
 
     if congestion is not None and not congestion.empty and failure is not None and not failure.empty:
-        section_header("Hypothesis evaluation", "Descriptive evidence from three repetitions; no significance claim")
+        repetitions = int(congestion["repetition"].nunique())
+        evidence_note = (
+            f"{repetitions} matched repetitions; formal reports include 95% confidence intervals"
+            if repetitions >= 10
+            else f"Pilot evidence from {repetitions} repetition(s); run 10 for formal analysis"
+        )
+        section_header("Hypothesis evaluation", evidence_note)
         st.dataframe(hypothesis_table(congestion, failure), width="stretch", hide_index=True)
 
 
@@ -660,7 +788,10 @@ def render_page() -> None:
     elif PAGE == "Routing":
         render_routing(latest, events)
     elif PAGE == "QoS":
-        render_qos(latest)
+        queue_history = load_qos_class_history(
+            DATABASE_PATH, SELECTED_RUN_ID, SAMPLE_LIMIT
+        )
+        render_qos(latest, queue_history)
     elif PAGE == "ANRE":
         render_anre(SELECTED_RUN, latest, events)
     elif PAGE == "Experiments":

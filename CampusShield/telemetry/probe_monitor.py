@@ -10,6 +10,7 @@ from typing import Any
 @dataclass(frozen=True)
 class ProbeMetrics:
     target: str
+    dscp_value: int
     packets_sent: int
     packets_received: int
     packet_loss_percent: float
@@ -18,15 +19,19 @@ class ProbeMetrics:
 
 
 def collect_probe_metrics(
-    node: Any, target: str, count: int = 5, interval_seconds: float = 0.2
+    node: Any,
+    target: str,
+    count: int = 5,
+    interval_seconds: float = 0.2,
+    dscp_value: int = 46,
 ) -> ProbeMetrics:
-    """Send lightweight ICMP probes and parse their individual RTT values."""
+    """Send EF-marked ICMP service probes and parse individual RTT values."""
     # Node.cmd() uses Mininet's one-at-a-time interactive shell. A separate
     # process permits a probe and byte-counter sampling to run concurrently on
     # the same router namespace without tripping Mininet's waiting assertion.
     process = node.popen(
         [
-            "ping", "-n", "-c", str(count),
+            "ping", "-n", "-Q", str(dscp_value << 2), "-c", str(count),
             "-i", str(interval_seconds), "-W", "1", target,
         ]
     )
@@ -54,6 +59,7 @@ def collect_probe_metrics(
 
     return ProbeMetrics(
         target=target,
+        dscp_value=dscp_value,
         packets_sent=count,
         packets_received=received,
         packet_loss_percent=loss_percent,

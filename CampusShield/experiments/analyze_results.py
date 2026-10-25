@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -15,6 +16,20 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = PROJECT_ROOT / "results"
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from experiments.congestion_design import SCENARIOS  # noqa: E402
+from experiments.statistics_utils import (  # noqa: E402
+    DescriptiveStatistics,
+    describe_95,
+)
+
+
+SCENARIO_LABELS = {
+    "ANRE_OFF": "Basic static",
+    "STATIC_TUNED": "Tuned static",
+    "ANRE_ON": "Adaptive ANRE",
+}
 
 
 def _latest(pattern: str) -> Path:
@@ -30,7 +45,7 @@ def parse_args() -> argparse.Namespace:
         "--congestion-csv",
         type=Path,
         default=None,
-        help="paired congestion CSV (default: latest comparison)",
+        help="three-arm congestion CSV (default: latest comparison)",
     )
     parser.add_argument(
         "--failure-csv",
@@ -38,70 +53,140 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="failure-recovery CSV (default: latest result)",
     )
+    parser.add_argument(
+        "--minimum-repetitions",
+        type=int,
+        default=10,
+        help="minimum complete repetitions required for formal analysis (default: 10)",
+    )
     return parser.parse_args()
 
 
-def _mean_std(frame: pd.DataFrame, scenario: str, metric: str) -> tuple[float, float]:
-    values = frame.loc[frame["scenario"] == scenario, metric]
-    return float(values.mean()), float(values.std(ddof=1))
+def _scenario_stats(
+    frame: pd.DataFrame, scenario: str, metric: str
+) -> DescriptiveStatistics:
+    values = frame.loc[frame["scenario"] == scenario, metric].dropna().tolist()
+    return describe_95(values)
+
+
+def _format_estimate(item: DescriptiveStatistics, unit: str) -> str:
+    return (
+        f"{item.mean:.3f} +/- {item.standard_deviation:.3f} {unit} "
+        f"[95% CI {item.ci95_low:.3f} to {item.ci95_high:.3f}]"
+    )
+
+
+def _validate_repetitions(
+    congestion: pd.DataFrame, minimum_repetitions: int
+) -> tuple[str, ...]:
+    available = tuple(
+        scenario
+        for scenario in SCENARIOS
+        if scenario in set(congestion["scenario"].astype(str))
+    )
+    required = (
+        SCENARIOS
+        if "STATIC_TUNED" in available
+        else ("ANRE_OFF", "ANRE_ON")
+    )
+    repetition_sets = {
+        scenario: set(
+            congestion.loc[congestion["scenario"] == scenario, "repetition"]
+        )
+        for scenario in required
+    }
+    common = set.intersection(*repetition_sets.values()) if repetition_sets else set()
+    if any(values != common for values in repetition_sets.values()):
+        raise ValueError("Congestion input has incomplete matched scenario repetitions")
+    if len(common) < minimum_repetitions:
+        raise ValueError(
+            f"Congestion input has {len(common)} complete repetition(s); "
+            f"at least {minimum_repetitions} are required"
+        )
+    return required
 
 
 def main() -> int:
     args = parse_args()
+    if args.minimum_repetitions < 2:
+        raise ValueError("Minimum repetitions must be at least 2 for confidence intervals")
     congestion_path = args.congestion_csv or _latest("congestion_comparison_*.csv")
     failure_path = args.failure_csv or _latest("failure_recovery_*.csv")
     congestion = pd.read_csv(congestion_path)
     failure = pd.read_csv(failure_path)
 
-    off_repetitions = set(
-        congestion.loc[congestion["scenario"] == "ANRE_OFF", "repetition"]
-    )
-    on_repetitions = set(
-        congestion.loc[congestion["scenario"] == "ANRE_ON", "repetition"]
-    )
-    if off_repetitions != on_repetitions or len(off_repetitions) < 3:
-        raise ValueError("Congestion input must contain at least three complete OFF/ON pairs")
-    if len(failure) < 3:
-        raise ValueError("Failure input must contain at least three repetitions")
+    scenarios = _validate_repetitions(congestion, args.minimum_repetitions)
+    if len(failure) < args.minimum_repetitions:
+        raise ValueError(
+            f"Failure input has {len(failure)} repetition(s); at least "
+            f"{args.minimum_repetitions} are required"
+        )
 
-    metric_definitions = (
+    metric_definitions = [
         ("emergency_throughput_mbps", "Emergency throughput", "Mbps"),
         ("emergency_udp_loss_percent", "Emergency UDP loss", "percent"),
         ("emergency_udp_jitter_ms", "Emergency UDP jitter", "ms"),
-        ("mean_rtt_ms", "Probe RTT", "ms"),
-        ("mean_nhs", "Network Health Score", "score"),
+        ("mean_rtt_ms", "EF probe RTT", "ms"),
+        ("mean_nhs", "Congestion NHS", "score"),
         ("bulk_throughput_mbps", "Bulk throughput", "Mbps"),
         ("academic_throughput_mbps", "Academic throughput", "Mbps"),
+    ]
+    optional_metrics = [
+        ("recovery_mean_nhs", "Recovery NHS", "score"),
+        ("recovery_nhs_change", "NHS recovery change", "score"),
+        ("emergency_queue_drops_congestion", "Emergency queue drops", "packets"),
+        ("peak_emergency_backlog_bytes", "Peak emergency backlog", "bytes"),
+    ]
+    metric_definitions.extend(
+        item for item in optional_metrics if item[0] in congestion.columns
     )
+
     rows: list[dict[str, object]] = []
-    comparison: dict[str, dict[str, float]] = {}
+    statistics: dict[str, dict[str, DescriptiveStatistics]] = {}
     for metric, label, unit in metric_definitions:
-        off_mean, off_std = _mean_std(congestion, "ANRE_OFF", metric)
-        on_mean, on_std = _mean_std(congestion, "ANRE_ON", metric)
-        delta = on_mean - off_mean
-        percent_change = (delta / off_mean) * 100 if off_mean else float("nan")
-        comparison[metric] = {
-            "off_mean": off_mean,
-            "off_std": off_std,
-            "on_mean": on_mean,
-            "on_std": on_std,
-            "delta": delta,
-            "percent_change": percent_change,
+        statistics[metric] = {}
+        for scenario in scenarios:
+            item = _scenario_stats(congestion, scenario, metric)
+            statistics[metric][scenario] = item
+            rows.append(
+                {
+                    "experiment": "THREE_ARM_CONGESTION",
+                    "scenario": scenario,
+                    "metric": metric,
+                    "label": label,
+                    "unit": unit,
+                    "n": item.count,
+                    "mean": item.mean,
+                    "std": item.standard_deviation,
+                    "ci95_low": item.ci95_low,
+                    "ci95_high": item.ci95_high,
+                    "minimum": item.minimum,
+                    "maximum": item.maximum,
+                }
+            )
+
+    comparisons: dict[str, dict[str, float]] = {}
+    for metric, _, _ in metric_definitions:
+        basic = statistics[metric]["ANRE_OFF"].mean
+        adaptive = statistics[metric]["ANRE_ON"].mean
+        comparisons[metric] = {
+            "adaptive_minus_basic": adaptive - basic,
+            "adaptive_vs_basic_percent": (
+                ((adaptive - basic) / basic) * 100 if basic else float("nan")
+            ),
         }
-        rows.append(
-            {
-                "experiment": "ANRE_OFF_VS_ON",
-                "metric": metric,
-                "label": label,
-                "unit": unit,
-                "off_mean": off_mean,
-                "off_std": off_std,
-                "on_mean": on_mean,
-                "on_std": on_std,
-                "delta_on_minus_off": delta,
-                "percent_change": percent_change,
-            }
-        )
+        if "STATIC_TUNED" in scenarios:
+            tuned = statistics[metric]["STATIC_TUNED"].mean
+            comparisons[metric].update(
+                {
+                    "adaptive_minus_tuned": adaptive - tuned,
+                    "adaptive_vs_tuned_percent": (
+                        ((adaptive - tuned) / tuned) * 100
+                        if tuned
+                        else float("nan")
+                    ),
+                }
+            )
 
     failure_metrics = (
         ("packets_lost_during_convergence", "Packets lost", "packets"),
@@ -109,43 +194,56 @@ def main() -> int:
         ("route_convergence_ms", "Backup route convergence", "ms"),
         ("primary_restoration_ms", "Primary route restoration", "ms"),
     )
-    failure_summary: dict[str, dict[str, float]] = {}
+    failure_statistics: dict[str, DescriptiveStatistics] = {}
     for metric, label, unit in failure_metrics:
-        values = failure[metric]
-        failure_summary[metric] = {
-            "mean": float(values.mean()),
-            "std": float(values.std(ddof=1)),
-            "minimum": float(values.min()),
-            "maximum": float(values.max()),
-        }
+        item = describe_95(failure[metric].dropna().tolist())
+        failure_statistics[metric] = item
         rows.append(
             {
                 "experiment": "LINK_FAILURE",
+                "scenario": "FAILURE_RECOVERY",
                 "metric": metric,
                 "label": label,
                 "unit": unit,
-                "mean": values.mean(),
-                "std": values.std(ddof=1),
-                "minimum": values.min(),
-                "maximum": values.max(),
+                "n": item.count,
+                "mean": item.mean,
+                "std": item.standard_deviation,
+                "ci95_low": item.ci95_low,
+                "ci95_high": item.ci95_high,
+                "minimum": item.minimum,
+                "maximum": item.maximum,
             }
         )
 
-    response = congestion.loc[
-        congestion["scenario"] == "ANRE_ON", "controller_response_seconds"
-    ]
-    rows.append(
-        {
-            "experiment": "ANRE_OFF_VS_ON",
-            "metric": "controller_response_seconds",
-            "label": "ANRE response time",
-            "unit": "seconds",
-            "on_mean": response.mean(),
-            "on_std": response.std(ddof=1),
-            "minimum": response.min(),
-            "maximum": response.max(),
-        }
+    controller_timings = (
+        ("controller_response_seconds", "ANRE response time"),
+        ("recovery_to_normal_seconds", "ANRE recovery-to-NORMAL time"),
     )
+    for metric, label in controller_timings:
+        if metric not in congestion.columns:
+            continue
+        values = congestion.loc[
+            congestion["scenario"] == "ANRE_ON", metric
+        ].dropna()
+        if values.empty:
+            continue
+        item = describe_95(values.tolist())
+        rows.append(
+            {
+                "experiment": "THREE_ARM_CONGESTION",
+                "scenario": "ANRE_ON",
+                "metric": metric,
+                "label": label,
+                "unit": "seconds",
+                "n": item.count,
+                "mean": item.mean,
+                "std": item.standard_deviation,
+                "ci95_low": item.ci95_low,
+                "ci95_high": item.ci95_high,
+                "minimum": item.minimum,
+                "maximum": item.maximum,
+            }
+        )
 
     summary_csv = RESULTS_ROOT / "core_experiment_summary.csv"
     analysis_md = RESULTS_ROOT / "core_experiment_analysis.md"
@@ -155,41 +253,42 @@ def main() -> int:
     hypotheses = [
         (
             "H1 - RTT",
-            comparison["mean_rtt_ms"]["on_mean"]
-            < comparison["mean_rtt_ms"]["off_mean"],
-            "Mean probe RTT with ANRE is lower than without ANRE.",
+            statistics["mean_rtt_ms"]["ANRE_ON"].mean
+            < statistics["mean_rtt_ms"]["ANRE_OFF"].mean,
+            "Mean EF-marked probe RTT with ANRE is lower than basic static QoS.",
         ),
         (
             "H2 - Packet loss",
-            comparison["emergency_udp_loss_percent"]["on_mean"]
-            < comparison["emergency_udp_loss_percent"]["off_mean"],
-            "Emergency UDP loss with ANRE is lower than without ANRE.",
+            statistics["emergency_udp_loss_percent"]["ANRE_ON"].mean
+            < statistics["emergency_udp_loss_percent"]["ANRE_OFF"].mean,
+            "Emergency UDP loss with ANRE is lower than basic static QoS.",
         ),
         (
             "H3 - Jitter",
-            comparison["emergency_udp_jitter_ms"]["on_mean"]
-            < comparison["emergency_udp_jitter_ms"]["off_mean"],
-            "Emergency UDP jitter with ANRE is lower than without ANRE.",
+            statistics["emergency_udp_jitter_ms"]["ANRE_ON"].mean
+            < statistics["emergency_udp_jitter_ms"]["ANRE_OFF"].mean,
+            "Emergency UDP jitter with ANRE is lower than basic static QoS.",
         ),
         (
             "H4 - Network recovery",
-            comparison["mean_nhs"]["on_mean"] > comparison["mean_nhs"]["off_mean"],
-            "Mean NHS with ANRE is higher than without ANRE.",
+            "recovery_nhs_change" in statistics
+            and statistics["recovery_nhs_change"]["ANRE_ON"].mean > 0,
+            "ANRE mean NHS increases from congestion to the recovery phase.",
         ),
         (
             "H5 - Bulk trade-off",
-            comparison["bulk_throughput_mbps"]["on_mean"]
-            < comparison["bulk_throughput_mbps"]["off_mean"]
-            and comparison["emergency_throughput_mbps"]["on_mean"]
-            > comparison["emergency_throughput_mbps"]["off_mean"],
-            "ANRE reduces bulk throughput while increasing emergency throughput.",
+            statistics["bulk_throughput_mbps"]["ANRE_ON"].mean
+            < statistics["bulk_throughput_mbps"]["ANRE_OFF"].mean
+            and statistics["emergency_throughput_mbps"]["ANRE_ON"].mean
+            > statistics["emergency_throughput_mbps"]["ANRE_OFF"].mean,
+            "ANRE increases emergency throughput while restricting bulk traffic.",
         ),
         (
             "H6 - Routing recovery",
             len(failure) >= 3
             and failure["route_after_failure"].str.contains("10.10.255.6").all()
             and failure["route_after_restoration"].str.contains("10.10.255.2").all(),
-            "Every repetition used the backup route and restored the primary route.",
+            "Every failure repetition uses the backup route and restores the primary.",
         ),
     ]
 
@@ -199,40 +298,64 @@ def main() -> int:
         f"Congestion source: `{congestion_path.name}`",
         f"Failure source: `{failure_path.name}`",
         "",
-        "This analysis uses three paired ANRE OFF/ON repetitions and three "
-        "physical-link-failure repetitions. Values are descriptive means and "
-        "sample standard deviations; n=3 is too small for strong inferential claims.",
+        f"The congestion analysis uses {len(set(congestion['repetition']))} matched "
+        f"repetitions across {len(scenarios)} scenario(s). Values report sample "
+        "standard deviation and two-sided 95% Student-t confidence intervals.",
         "",
         "## Congestion comparison",
         "",
-        "| Metric | ANRE OFF mean +/- SD | ANRE ON mean +/- SD | Change |",
-        "|---|---:|---:|---:|",
+        "| Metric | "
+        + " | ".join(SCENARIO_LABELS[item] for item in scenarios)
+        + " |",
+        "|---|" + "---:|" * len(scenarios),
     ]
     for metric, label, unit in metric_definitions:
-        item = comparison[metric]
         lines.append(
-            f"| {label} | {item['off_mean']:.3f} +/- {item['off_std']:.3f} {unit} "
-            f"| {item['on_mean']:.3f} +/- {item['on_std']:.3f} {unit} "
-            f"| {item['percent_change']:+.2f}% |"
+            f"| {label} | "
+            + " | ".join(
+                _format_estimate(statistics[metric][scenario], unit)
+                for scenario in scenarios
+            )
+            + " |"
         )
+
     lines.extend(
         [
             "",
-            f"Mean ANRE response time: {response.mean():.3f} +/- "
-            f"{response.std(ddof=1):.3f} seconds.",
+            "## Adaptive comparisons",
+            "",
+            "| Metric | ANRE vs basic static | ANRE vs tuned static |",
+            "|---|---:|---:|",
+        ]
+    )
+    for metric, label, _ in metric_definitions:
+        item = comparisons[metric]
+        tuned_text = (
+            f"{item['adaptive_vs_tuned_percent']:+.2f}%"
+            if "adaptive_vs_tuned_percent" in item
+            else "Not available"
+        )
+        lines.append(
+            f"| {label} | {item['adaptive_vs_basic_percent']:+.2f}% | "
+            f"{tuned_text} |"
+        )
+
+    lines.extend(
+        [
             "",
             "## Physical link failure",
             "",
-            "| Metric | Mean +/- SD | Range |",
+            "| Metric | Mean, SD and 95% CI | Range |",
             "|---|---:|---:|",
         ]
     )
     for metric, label, unit in failure_metrics:
-        item = failure_summary[metric]
+        item = failure_statistics[metric]
         lines.append(
-            f"| {label} | {item['mean']:.3f} +/- {item['std']:.3f} {unit} "
-            f"| {item['minimum']:.3f} to {item['maximum']:.3f} {unit} |"
+            f"| {label} | {_format_estimate(item, unit)} | "
+            f"{item.minimum:.3f} to {item.maximum:.3f} {unit} |"
         )
+
     lines.extend(
         [
             "",
@@ -248,43 +371,55 @@ def main() -> int:
         )
     lines.extend(
         [
-            "| H7 - Tuned OSPF | Not tested | This remains a secondary experiment. |",
+            "| H7 - Tuned OSPF | Not tested | This remains a Phase 3 routing experiment. |",
             "",
             "## Interpretation",
             "",
-            "ANRE produced the intended service trade-off: it increased emergency "
-            "throughput and reduced emergency packet loss by restricting bulk traffic. "
-            "The repeated measurements did not show lower mean RTT, lower mean jitter, "
-            "or a higher mean NHS, so those hypotheses are not supported by this dataset. "
-            "All physical-failure repetitions automatically converged to R1-R3-R2 and "
-            "later restored the direct R1-R2 route, supporting the routing-recovery claim.",
+            "The three-arm design compares ANRE with both the original basic static "
+            "allocation and a stronger fixed emergency-priority allocation. The "
+            "healthy, congestion, and recovery phases also expose controller response "
+            "and recovery behavior instead of measuring only a constant overload. "
+            "Hypotheses are reported directly from the measured directions above; "
+            "confidence intervals show the uncertainty between repetitions.",
             "",
         ]
     )
     analysis_md.write_text("\n".join(lines), encoding="utf-8")
 
-    off = congestion[congestion["scenario"] == "ANRE_OFF"].sort_values("repetition")
-    on = congestion[congestion["scenario"] == "ANRE_ON"].sort_values("repetition")
-    figure, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
-    figure.suptitle("CampusShield Core Experimental Summary")
+    figure, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+    figure.suptitle("CampusShield Phase 2 Experimental Summary")
+    scenario_positions = [SCENARIO_LABELS[item] for item in scenarios]
     paired = (
         (axes[0, 0], "emergency_throughput_mbps", "Emergency throughput", "Mbps"),
         (axes[0, 1], "emergency_udp_loss_percent", "Emergency UDP loss", "Percent"),
     )
+    pivot = pd.DataFrame()
     for axis, metric, title, unit in paired:
-        for repetition, off_value, on_value in zip(
-            off["repetition"], off[metric], on[metric]
-        ):
-            axis.plot(["ANRE OFF", "ANRE ON"], [off_value, on_value], marker="o", label=f"Rep {repetition}")
+        pivot = congestion.pivot(
+            index="repetition", columns="scenario", values=metric
+        )
+        for repetition, values in pivot.iterrows():
+            axis.plot(
+                scenario_positions,
+                [values[scenario] for scenario in scenarios],
+                marker="o",
+                alpha=0.7,
+                label=f"Rep {repetition}",
+            )
         axis.set(title=title, ylabel=unit)
         axis.grid(axis="y", alpha=0.25)
-        axis.legend()
+    if len(pivot) <= 10:
+        axes[0, 1].legend(ncol=2, fontsize=8)
+
     axes[1, 0].bar(
-        failure["repetition"].astype(str), failure["service_interruption_ms"],
+        failure["repetition"].astype(str),
+        failure["service_interruption_ms"],
         color="#0f766e",
     )
     axes[1, 0].set(
-        title="Failure service interruption", xlabel="Repetition", ylabel="Milliseconds"
+        title="Failure service interruption",
+        xlabel="Repetition",
+        ylabel="Milliseconds",
     )
     axes[1, 1].bar(
         failure["repetition"].astype(str),
@@ -292,7 +427,9 @@ def main() -> int:
         color="#b45309",
     )
     axes[1, 1].set(
-        title="Packets lost during convergence", xlabel="Repetition", ylabel="Packets"
+        title="Packets lost during convergence",
+        xlabel="Repetition",
+        ylabel="Packets",
     )
     for axis in axes[1]:
         axis.grid(axis="y", alpha=0.25)

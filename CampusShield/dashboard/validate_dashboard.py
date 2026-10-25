@@ -50,7 +50,9 @@ def main() -> int:
     from streamlit.testing.v1 import AppTest
 
     app = AppTest.from_file(str(PROJECT_ROOT / "dashboard" / "app.py"))
-    app.run(timeout=15)
+    # Plotly and Streamlit imports can be slow from a WSL-mounted Windows
+    # project, so allow enough time for a cold validation run.
+    app.run(timeout=45)
     checks["Streamlit rendered without exception"] = not list(app.exception)
     checks["dashboard title rendered"] = any(
         "CampusShield" in item.value for item in app.markdown
@@ -78,6 +80,18 @@ def main() -> int:
         )
     )
     checks["decision reason uses panel styling"] = "Evidence note" in rendered_markup
+
+    app.radio[0].set_value("QoS").run(timeout=45)
+    qos_markup = "\n".join(item.value for item in app.markdown)
+    checks["QoS queue-evidence view rendered"] = (
+        not list(app.exception) and "Kernel queue evidence" in qos_markup
+    )
+
+    app.radio[0].set_value("Experiments").run(timeout=45)
+    experiment_markup = "\n".join(item.value for item in app.markdown)
+    checks["three-arm experiment view rendered"] = (
+        not list(app.exception) and "Three-arm adaptive comparison" in experiment_markup
+    )
 
     for description, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'}: {description}")

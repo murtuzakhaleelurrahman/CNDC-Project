@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ def _rows(connection: sqlite3.Connection, sql: str, values=()) -> list[dict[str,
 
 
 def load_runs(database_path: str | Path) -> list[dict[str, Any]]:
-    with _connect_read_only(database_path) as connection:
+    with closing(_connect_read_only(database_path)) as connection:
         return _rows(
             connection,
             """
@@ -47,7 +48,7 @@ def load_runs(database_path: str | Path) -> list[dict[str, Any]]:
 def load_latest_telemetry(
     database_path: str | Path, run_id: int
 ) -> dict[str, Any] | None:
-    with _connect_read_only(database_path) as connection:
+    with closing(_connect_read_only(database_path)) as connection:
         rows = _rows(
             connection,
             """
@@ -64,7 +65,7 @@ def load_latest_telemetry(
 def load_telemetry_history(
     database_path: str | Path, run_id: int, limit: int = 300
 ) -> list[dict[str, Any]]:
-    with _connect_read_only(database_path) as connection:
+    with closing(_connect_read_only(database_path)) as connection:
         return _rows(
             connection,
             """
@@ -80,10 +81,54 @@ def load_telemetry_history(
         )
 
 
+def load_qos_class_history(
+    database_path: str | Path, run_id: int, limit: int = 300
+) -> list[dict[str, Any]]:
+    """Return per-class queue evidence, or no rows for a legacy database."""
+    with closing(_connect_read_only(database_path)) as connection:
+        table_exists = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'qos_class_samples'
+            """
+        ).fetchone()
+        if table_exists is None:
+            return []
+        return _rows(
+            connection,
+            """
+            SELECT
+                t.timestamp_utc,
+                t.interface,
+                q.class_name,
+                q.class_id,
+                q.dscp_value,
+                q.sent_bytes,
+                q.sent_packets,
+                q.dropped_packets,
+                q.overlimits,
+                q.requeues,
+                q.backlog_bytes,
+                q.backlog_packets
+            FROM qos_class_samples q
+            JOIN telemetry_samples t ON t.id = q.telemetry_sample_id
+            WHERE t.run_id = ?
+              AND t.id IN (
+                  SELECT id FROM telemetry_samples
+                  WHERE run_id = ?
+                  ORDER BY timestamp_utc DESC, id DESC
+                  LIMIT ?
+              )
+            ORDER BY t.timestamp_utc ASC, t.id ASC, q.class_id ASC
+            """,
+            (run_id, run_id, limit),
+        )
+
+
 def load_recent_events(
     database_path: str | Path, run_id: int, limit: int = 50
 ) -> list[dict[str, Any]]:
-    with _connect_read_only(database_path) as connection:
+    with closing(_connect_read_only(database_path)) as connection:
         return _rows(
             connection,
             """
@@ -99,7 +144,7 @@ def load_recent_events(
 def load_results(
     database_path: str | Path, run_id: int
 ) -> list[dict[str, Any]]:
-    with _connect_read_only(database_path) as connection:
+    with closing(_connect_read_only(database_path)) as connection:
         return _rows(
             connection,
             """

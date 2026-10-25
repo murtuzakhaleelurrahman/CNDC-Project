@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE_PATH = PROJECT_ROOT / "database" / "campusshield.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -33,6 +33,8 @@ class TelemetryRecord:
     tx_mbps: float
     rx_mbps: float
     utilization_percent: float
+    probe_dscp_value: int | None = None
+    qos_classes: Mapping[str, Mapping[str, Any]] | None = None
     nhs: float | None = None
     anre_state: str | None = None
     link_name: str | None = None
@@ -69,6 +71,12 @@ class TelemetryRecord:
             tx_mbps=float(interface["tx_mbps"]),
             rx_mbps=float(interface["rx_mbps"]),
             utilization_percent=float(interface["tx_utilization_percent"]),
+            probe_dscp_value=(
+                int(probe["dscp_value"])
+                if probe.get("dscp_value") is not None
+                else None
+            ),
+            qos_classes=snapshot.get("qos_classes") or {},
             nhs=nhs,
             anre_state=anre_state,
             link_name=link_name,
@@ -146,6 +154,7 @@ class CampusShieldDatabase:
                     tx_mbps REAL NOT NULL,
                     rx_mbps REAL NOT NULL,
                     utilization_percent REAL NOT NULL,
+                    probe_dscp_value INTEGER,
                     nhs REAL,
                     anre_state TEXT,
                     link_name TEXT,
@@ -154,6 +163,23 @@ class CampusShieldDatabase:
                     route_next_hop TEXT,
                     route_interface TEXT,
                     route_state TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS qos_class_samples (
+                    id INTEGER PRIMARY KEY,
+                    telemetry_sample_id INTEGER NOT NULL
+                        REFERENCES telemetry_samples(id) ON DELETE CASCADE,
+                    class_name TEXT NOT NULL,
+                    class_id INTEGER NOT NULL,
+                    dscp_value INTEGER NOT NULL,
+                    sent_bytes INTEGER NOT NULL,
+                    sent_packets INTEGER NOT NULL,
+                    dropped_packets INTEGER NOT NULL,
+                    overlimits INTEGER NOT NULL,
+                    requeues INTEGER NOT NULL,
+                    backlog_bytes INTEGER NOT NULL,
+                    backlog_packets INTEGER NOT NULL,
+                    UNIQUE (telemetry_sample_id, class_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS controller_events (
@@ -186,6 +212,8 @@ class CampusShieldDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_telemetry_run_time
                     ON telemetry_samples(run_id, timestamp_utc);
+                CREATE INDEX IF NOT EXISTS idx_qos_sample_class
+                    ON qos_class_samples(telemetry_sample_id, class_name);
                 CREATE INDEX IF NOT EXISTS idx_events_run_time
                     ON controller_events(run_id, timestamp_utc);
                 CREATE INDEX IF NOT EXISTS idx_events_type
@@ -194,6 +222,16 @@ class CampusShieldDatabase:
                     ON experiment_results(run_id, metric_name);
                 """
             )
+            telemetry_columns = {
+                row[1]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(telemetry_samples)"
+                )
+            }
+            if "probe_dscp_value" not in telemetry_columns:
+                self.connection.execute(
+                    "ALTER TABLE telemetry_samples ADD COLUMN probe_dscp_value INTEGER"
+                )
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -249,6 +287,7 @@ class CampusShieldDatabase:
             record.tx_mbps,
             record.rx_mbps,
             record.utilization_percent,
+            record.probe_dscp_value,
             record.nhs,
             record.anre_state,
             record.link_name,
@@ -264,14 +303,39 @@ class CampusShieldDatabase:
                 INSERT INTO telemetry_samples (
                     run_id, timestamp_utc, router, source_host, target_ip,
                     interface, rtt_ms, packet_loss_percent, jitter_ms,
-                    tx_mbps, rx_mbps, utilization_percent, nhs, anre_state,
+                    tx_mbps, rx_mbps, utilization_percent, probe_dscp_value,
+                    nhs, anre_state,
                     link_name, link_health, qos_policy, route_next_hop,
                     route_interface, route_state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
-        return int(cursor.lastrowid)
+            telemetry_sample_id = int(cursor.lastrowid)
+            for class_name, stats in (record.qos_classes or {}).items():
+                self.connection.execute(
+                    """
+                    INSERT INTO qos_class_samples (
+                        telemetry_sample_id, class_name, class_id, dscp_value,
+                        sent_bytes, sent_packets, dropped_packets, overlimits,
+                        requeues, backlog_bytes, backlog_packets
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        telemetry_sample_id,
+                        str(class_name),
+                        int(stats["class_id"]),
+                        int(stats["dscp_value"]),
+                        int(stats["sent_bytes"]),
+                        int(stats["sent_packets"]),
+                        int(stats["dropped_packets"]),
+                        int(stats["overlimits"]),
+                        int(stats["requeues"]),
+                        int(stats["backlog_bytes"]),
+                        int(stats["backlog_packets"]),
+                    ),
+                )
+        return telemetry_sample_id
 
     def log_event(self, run_id: int | None, event: EventRecord) -> int:
         timestamp = event.timestamp_utc or utc_now()

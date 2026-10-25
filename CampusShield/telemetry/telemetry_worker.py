@@ -9,6 +9,7 @@ from typing import Any
 
 from telemetry.interface_monitor import collect_interface_metrics
 from telemetry.probe_monitor import collect_probe_metrics
+from telemetry.qos_monitor import collect_qos_class_metrics
 from telemetry.route_monitor import collect_route_metrics
 
 
@@ -41,12 +42,16 @@ def collect_snapshot(
     route_metrics = collect_route_metrics(
         nodes[router_name], target_ip, expected_interface=interface
     )
+    qos_classes = collect_qos_class_metrics(nodes[router_name], interface)
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "router": router_name,
         "source_host": source_host,
         "interface": asdict(interface_metrics),
         "probe": asdict(probe_metrics),
+        "qos_classes": {
+            name: asdict(metrics) for name, metrics in qos_classes.items()
+        },
         "route": asdict(route_metrics),
     }
 

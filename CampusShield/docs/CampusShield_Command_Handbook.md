@@ -24,8 +24,8 @@ If your prompt already begins with `(campusshield)`, the environment is active.
 | Goal | Command | Main output |
 |---|---|---|
 | Experiment 1: healthy baseline | `sudo "$(which python3)" experiments/experiment_runner.py baseline --duration 30` | SQLite run, baseline CSV, baseline PNG |
-| Experiment 2: congestion, ANRE OFF vs ON | `sudo "$(which python3)" experiments/experiment_runner.py congestion --duration 20 --repetitions 3` | SQLite runs, comparison CSV and PNG |
-| Experiment 3: physical link failure and recovery | `sudo "$(which python3)" experiments/experiment_runner.py failure --repetitions 3 --timeout 20` | SQLite runs, recovery CSV and PNG |
+| Experiment 2: three-arm phased congestion | `sudo "$(which python3)" experiments/experiment_runner.py congestion --healthy-duration 10 --duration 30 --recovery-duration 20 --repetitions 10` | SQLite runs, comparison CSV and PNG |
+| Experiment 3: physical link failure and recovery | `sudo "$(which python3)" experiments/experiment_runner.py failure --repetitions 10 --timeout 20` | SQLite runs, recovery CSV and PNG |
 | Analyze Experiments 2 and 3 | `python3 experiments/analyze_results.py` | Summary CSV, analysis Markdown, summary PNG |
 
 Run only one Mininet experiment at a time.
@@ -57,28 +57,32 @@ Files: `results/baseline_run_<id>.csv` and `results/baseline_run_<id>.png`
 
 `--duration 30` controls the measurement period in seconds. Use 30 seconds for reportable evidence. The program requires at least 3 seconds.
 
-## Experiment 2 - congestion and ANRE comparison
+## Experiment 2 - three-arm phased congestion comparison
 
 ```bash
 source ~/.venvs/campusshield/bin/activate
 cd "/mnt/d/CNDC Project/CampusShield"
-sudo "$(which python3)" experiments/experiment_runner.py congestion --duration 20 --repetitions 3
+sudo "$(which python3)" experiments/experiment_runner.py congestion \
+  --healthy-duration 10 \
+  --duration 30 \
+  --recovery-duration 20 \
+  --repetitions 10
 ```
 
-What it does: performs paired ANRE OFF and ANRE ON scenarios using the same offered traffic, measures the real network response, stores telemetry and controller events, and creates a comparison graph.
+What it does: compares basic static QoS, tuned static QoS, and adaptive ANRE using matched healthy, congestion, and recovery phases. It records EF probe quality, traffic performance, NHS recovery, controller response, and per-class queue evidence.
 
 Expected final message: `CONGESTION COMPARISON EXPERIMENT PASSED`
 
 Files: `results/congestion_comparison_<group-id>.csv` and `results/congestion_comparison_<group-id>.png`
 
-`--duration 20` is the time for each OFF or ON scenario. `--repetitions 3` creates three paired repetitions. Use three repetitions for reportable results. The experiment requires at least 8 seconds per scenario.
+Use ten matched repetitions for formal results. The durations control the healthy, congested, and recovery windows inside every scenario. For a quick pilot only, use `--healthy-duration 4 --duration 12 --recovery-duration 8 --repetitions 1`.
 
 ## Experiment 3 - link failure and OSPF recovery
 
 ```bash
 source ~/.venvs/campusshield/bin/activate
 cd "/mnt/d/CNDC Project/CampusShield"
-sudo "$(which python3)" experiments/experiment_runner.py failure --repetitions 3 --timeout 20
+sudo "$(which python3)" experiments/experiment_runner.py failure --repetitions 10 --timeout 20
 ```
 
 What it does: creates a fresh topology for each repetition, verifies the direct R1-R2 route, disables that physical link, measures convergence to R1-R3-R2, restores the link, measures restoration of the direct route, and records packet loss and interruption time.
@@ -87,11 +91,11 @@ Expected final message: `LINK FAILURE EXPERIMENT PASSED`
 
 Files: `results/failure_recovery_<group-id>.csv` and `results/failure_recovery_<group-id>.png`
 
-`--repetitions 3` controls the number of fresh runs. `--timeout 20` is the maximum wait for each route change.
+`--repetitions 10` controls the number of fresh runs used for formal confidence intervals. `--timeout 20` is the maximum wait for each route change.
 
 ## Analyze repeated experiments
 
-Run this after completing at least three congestion pairs and three failure repetitions:
+Run this after completing ten matched congestion repetitions and ten failure repetitions:
 
 ```bash
 source ~/.venvs/campusshield/bin/activate
@@ -99,7 +103,7 @@ cd "/mnt/d/CNDC Project/CampusShield"
 python3 experiments/analyze_results.py
 ```
 
-What it does: calculates descriptive means and sample standard deviations, evaluates the hypotheses from measured directions of change, and builds final comparison artifacts.
+What it does: calculates descriptive means, sample standard deviations, and two-sided 95% Student-t confidence intervals, evaluates the hypotheses from measured directions of change, and builds final comparison artifacts.
 
 Expected final message: `CORE EXPERIMENT ANALYSIS PASSED`
 

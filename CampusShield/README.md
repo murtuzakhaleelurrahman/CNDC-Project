@@ -197,6 +197,38 @@ The continuous low-overhead jitter value is the mean absolute change between
 consecutive ping RTT samples. Formal UDP experiments will also use iPerf3's
 receiver-reported jitter for validation.
 
+### Phase 1 measurement accuracy
+
+CampusShield service probes are marked as DSCP EF (`ping -Q 184`) so their
+RTT, loss, and delay variation traverse the same emergency HTB class as the
+protected traffic. This fixes the earlier ambiguity where unmarked probes
+could enter the default bulk class.
+
+Every telemetry snapshot also reads `tc -s class` from the observed core
+interface and stores separate Emergency, Academic, and Bulk evidence:
+
+- cumulative transmitted bytes and packets;
+- cumulative dropped packets, overlimits, and requeues;
+- instantaneous backlog bytes and packets;
+- the class ID and DSCP value used for classification.
+
+The queue evidence is stored in `qos_class_samples`, linked to the matching
+`telemetry_samples` row, and is shown in the dashboard's QoS view. Formal CSV
+artifacts contain flattened queue fields such as
+`emergency_dropped_packets` and `bulk_backlog_bytes`.
+
+The proposal's NHS formula and weights are intentionally unchanged. Queue
+counters are supporting diagnostic evidence rather than an undocumented new
+health-score term. Runs collected before this schema upgrade remain readable,
+but their QoS page correctly reports that per-class evidence was not recorded.
+
+Run the platform-independent Phase 1 tests with:
+
+```bash
+cd "/mnt/d/CNDC Project/CampusShield"
+python3 -m unittest discover -s tests -v
+```
+
 ## Run baseline calibration and NHS validation
 
 The proposal's normal calibration period is 30 seconds:
@@ -445,24 +477,46 @@ The run is stored with `run_type = BASELINE` and `is_experimental = 1`, so it
 is available immediately in the Streamlit run selector. Repeating the command
 creates a new run instead of overwriting earlier measurements.
 
-## Run Experiment 2 - ANRE OFF versus ANRE ON
+## Run Experiment 2 - three-arm adaptive congestion comparison
 
-This command performs three paired repetitions. Every OFF and ON scenario uses
-a fresh topology and the same offered workload: 60 Mbps emergency UDP plus
-competing academic and bulk TCP on the 100 Mbps primary link.
+The Phase 2 design compares three matched scenarios on fresh topologies:
+
+- `ANRE_OFF`: the original fixed NORMAL 20/50/30 Mbps allocation;
+- `STATIC_TUNED`: a stronger fixed 55/35/10 Mbps emergency-priority policy;
+- `ANRE_ON`: the controller starts at NORMAL and changes policy only from
+  measured NHS and hysteresis decisions.
+
+Every scenario has a 10-second healthy phase, a 30-second congested phase, and
+a 20-second recovery phase. Congestion offers 60 Mbps emergency UDP plus
+competing academic and bulk TCP on the 100 Mbps primary link. Healthy and
+recovery phases use a controlled 10 Mbps emergency flow. Scenario order rotates
+between repetitions to reduce systematic run-order bias.
 
 ```bash
 source ~/.venvs/campusshield/bin/activate
 cd "/mnt/d/CNDC Project/CampusShield"
 sudo "$(which python3)" experiments/experiment_runner.py congestion \
-  --duration 20 \
-  --repetitions 3
+  --healthy-duration 10 \
+  --duration 30 \
+  --recovery-duration 20 \
+  --repetitions 10
 ```
 
-ANRE OFF keeps the NORMAL 20/50/30 Mbps allocation for the whole scenario.
-ANRE ON also begins with that allocation, calculates NHS from live telemetry,
-applies hysteresis, and records any real state transition and QoS response
-time. The test does not force a transition or manufacture an improvement.
+The runner records the phase name on every telemetry row, calculates formal
+congestion metrics only from the congested window, and separately records
+healthy NHS, recovery NHS, recovery-to-NORMAL time, per-class queue-drop
+deltas, and peak emergency backlog. The test does not force an ANRE transition
+or manufacture an improvement.
+
+Use this shorter command only to verify the workflow before a formal run:
+
+```bash
+sudo "$(which python3)" experiments/experiment_runner.py congestion \
+  --healthy-duration 4 \
+  --duration 12 \
+  --recovery-duration 8 \
+  --repetitions 1
+```
 
 Each scenario stores its telemetry, flow metrics, ANRE events, and results in
 SQLite. The comparison also creates:
@@ -478,9 +532,9 @@ Successful data collection ends with:
 CONGESTION COMPARISON EXPERIMENT PASSED
 ```
 
-This message means the paired measurements were collected successfully. The
+This message means the matched measurements were collected successfully. The
 measured values, rather than the PASS message, determine whether each research
-hypothesis is supported. Use the three-repetition command for reportable
+hypothesis is supported. Use ten repetitions for reportable congestion
 results; a shorter single repetition is only a pilot check.
 
 Only one command from `experiments/experiment_runner.py` may run at a time.
@@ -493,7 +547,7 @@ would share and corrupt the same virtual-network namespaces.
 source ~/.venvs/campusshield/bin/activate
 cd "/mnt/d/CNDC Project/CampusShield"
 sudo "$(which python3)" experiments/experiment_runner.py failure \
-  --repetitions 3 \
+  --repetitions 10 \
   --timeout 20
 ```
 
@@ -524,8 +578,8 @@ LINK FAILURE EXPERIMENT PASSED
 
 ## Analyze the repeated core experiments
 
-After the three-repetition congestion and failure commands finish, generate
-the descriptive summary and hypothesis evaluation:
+After the ten-repetition three-arm congestion command and the repeated failure
+command finish, generate the descriptive summary and hypothesis evaluation:
 
 ```bash
 source ~/.venvs/campusshield/bin/activate
@@ -533,8 +587,12 @@ cd "/mnt/d/CNDC Project/CampusShield"
 python3 experiments/analyze_results.py
 ```
 
-The analyzer requires at least three complete OFF/ON pairs and three failure
-repetitions. It reports means and sample standard deviations and creates:
+The analyzer requires ten complete matched congestion repetitions and ten
+failure repetitions by default. It reports means, sample standard
+deviations, two-sided 95% Student-t confidence intervals, adaptive-versus-basic
+changes, and adaptive-versus-tuned changes. For a legacy or pilot dataset, the
+minimum may be lowered explicitly, for example
+`--minimum-repetitions 3`; such output is not the formal Phase 2 result.
 
 ```text
 results/core_experiment_summary.csv
@@ -549,8 +607,8 @@ CORE EXPERIMENT ANALYSIS PASSED
 ```
 
 Hypotheses are marked supported or not supported directly from the measured
-direction of change. With only three repetitions, the report treats these as
-descriptive findings and does not claim statistical significance.
+direction of change. Confidence intervals report uncertainty and are not
+misrepresented as proof of causation or practical significance.
 
 ## Open the Mininet command line
 

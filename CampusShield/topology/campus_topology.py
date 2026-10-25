@@ -232,7 +232,10 @@ def route_uses(router: Node, destination: str, expected: str) -> tuple[bool, str
     output = router.cmd(
         f"ip -color=never route get {shlex.quote(destination)} 2>&1"
     )
-    return expected in output, output.strip()
+    normalized_output = "\n".join(
+        line.rstrip() for line in output.strip().splitlines()
+    )
+    return expected in normalized_output, normalized_output
 
 
 def validate_segmentation(nodes: dict[str, Node]) -> bool:
