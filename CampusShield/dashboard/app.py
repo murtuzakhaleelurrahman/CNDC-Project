@@ -52,6 +52,8 @@ RUN_TYPE_LABELS = {
     "CONGESTION_STATIC_TUNED": "Tuned static",
     "CONGESTION_ANRE_ON": "ANRE on",
     "FAILURE_RECOVERY": "Recovery",
+    "OSPF_DEFAULT": "OSPF default",
+    "OSPF_TUNED": "OSPF tuned",
     "VALIDATION": "Validation",
 }
 
@@ -565,7 +567,11 @@ def render_anre(run: dict[str, Any], latest: dict[str, Any] | None, events: list
     render_event_stream(anre_events, limit=25)
 
 
-def hypothesis_table(congestion: pd.DataFrame, failure: pd.DataFrame) -> pd.DataFrame:
+def hypothesis_table(
+    congestion: pd.DataFrame,
+    failure: pd.DataFrame,
+    ospf: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     off = congestion[congestion["scenario"] == "ANRE_OFF"]
     on = congestion[congestion["scenario"] == "ANRE_ON"]
     recovery_supported = (
@@ -587,7 +593,25 @@ def hypothesis_table(congestion: pd.DataFrame, failure: pd.DataFrame) -> pd.Data
         ("H6 · Routing recovery", failure["route_after_failure"].str.contains("r1-eth1", na=False).all() and failure["route_after_restoration"].str.contains("r1-eth0", na=False).all(), "Every repetition uses backup and restores primary"),
     ]
     rows = [{"Hypothesis": name, "Outcome": "SUPPORTED" if result else "NOT SUPPORTED", "Measured criterion": criterion} for name, result, criterion in checks]
-    rows.append({"Hypothesis": "H7 · Tuned OSPF", "Outcome": "NOT TESTED", "Measured criterion": "Secondary experiment has not been run"})
+    if ospf is None or ospf.empty:
+        rows.append({"Hypothesis": "H7 · Tuned OSPF", "Outcome": "NOT TESTED", "Measured criterion": "Phase 3 evidence is not available"})
+    else:
+        default_ms = ospf.loc[
+            ospf["scenario"] == "OSPF_DEFAULT", "service_interruption_ms"
+        ].mean()
+        tuned_ms = ospf.loc[
+            ospf["scenario"] == "OSPF_TUNED", "service_interruption_ms"
+        ].mean()
+        supported = tuned_ms < default_ms
+        improvement = ((default_ms - tuned_ms) / default_ms) * 100 if default_ms else 0
+        rows.append({
+            "Hypothesis": "H7 · Tuned OSPF",
+            "Outcome": "SUPPORTED" if supported else "NOT SUPPORTED",
+            "Measured criterion": (
+                f"Tuned {tuned_ms:.1f} ms vs default {default_ms:.1f} ms "
+                f"({improvement:+.1f}% improvement)"
+            ),
+        })
     return pd.DataFrame(rows)
 
 
@@ -595,6 +619,7 @@ def render_experiments() -> None:
     baseline, baseline_path = read_result("baseline_run_*.csv")
     congestion, congestion_path = read_result("congestion_comparison_*.csv")
     failure, failure_path = read_result("failure_recovery_*.csv")
+    ospf, ospf_path = read_result("ospf_optimization_*.csv")
     section_header("Experiment 1 · Baseline calibration", baseline_path.name if baseline_path else "No result file")
     if baseline is None or baseline.empty:
         empty_state("No baseline CSV is available.")
@@ -672,6 +697,49 @@ def render_experiments() -> None:
             ("Mean primary restoration", display_value(failure["primary_restoration_ms"].mean(), " ms", 2)),
         ]), unsafe_allow_html=True)
 
+    ospf_note = ospf_path.name if ospf_path else "No result file"
+    if ospf is not None and not ospf.empty:
+        ospf_repetitions = int(ospf["repetition"].nunique())
+        ospf_note += (
+            f" · Formal evidence ({ospf_repetitions} matched repetitions)"
+            if ospf_repetitions >= 10
+            else f" · Pilot evidence ({ospf_repetitions} of 10 matched repetitions)"
+        )
+    section_header("Experiment 4 · OSPF optimization", ospf_note)
+    if ospf is None or ospf.empty:
+        empty_state("No default-versus-tuned OSPF comparison is available yet.")
+    else:
+        ospf_labels = {"OSPF_DEFAULT": "Default", "OSPF_TUNED": "Tuned"}
+        ospf_chart = go.Figure()
+        for scenario, color in (("OSPF_DEFAULT", COLORS["dim"]), ("OSPF_TUNED", COLORS["cyan"])):
+            sample = ospf[ospf["scenario"] == scenario]
+            ospf_chart.add_scatter(
+                name=ospf_labels[scenario],
+                x=sample["repetition"],
+                y=sample["service_interruption_ms"],
+                mode="lines+markers",
+                line=dict(color=color, width=2),
+            )
+        ospf_chart.update_layout(
+            title="Matched service interruption by repetition",
+            xaxis_title="Repetition",
+            yaxis_title="Milliseconds",
+        )
+        st.plotly_chart(style_figure(ospf_chart, 340), width="stretch", config={"displaylogo": False})
+        default_rows = ospf[ospf["scenario"] == "OSPF_DEFAULT"]
+        tuned_rows = ospf[ospf["scenario"] == "OSPF_TUNED"]
+        default_ms = default_rows["service_interruption_ms"].mean()
+        tuned_ms = tuned_rows["service_interruption_ms"].mean()
+        improvement = ((default_ms - tuned_ms) / default_ms) * 100 if default_ms else 0
+        st.markdown(panel_html("Measured OSPF comparison", [
+            ("Matched repetitions", int(min(default_rows["repetition"].nunique(), tuned_rows["repetition"].nunique()))),
+            ("Default interruption", display_value(default_ms, " ms", 2)),
+            ("Tuned interruption", display_value(tuned_ms, " ms", 2)),
+            ("Recovery improvement", display_value(improvement, "%", 2)),
+            ("Default packets lost", display_value(default_rows["packets_lost_during_convergence"].mean(), "", 2)),
+            ("Tuned packets lost", display_value(tuned_rows["packets_lost_during_convergence"].mean(), "", 2)),
+        ]), unsafe_allow_html=True)
+
     if congestion is not None and not congestion.empty and failure is not None and not failure.empty:
         repetitions = int(congestion["repetition"].nunique())
         evidence_note = (
@@ -680,7 +748,7 @@ def render_experiments() -> None:
             else f"Pilot evidence from {repetitions} repetition(s); run 10 for formal analysis"
         )
         section_header("Hypothesis evaluation", evidence_note)
-        st.dataframe(hypothesis_table(congestion, failure), width="stretch", hide_index=True)
+        st.dataframe(hypothesis_table(congestion, failure, ospf), width="stretch", hide_index=True)
 
 
 def render_events(events: list[dict[str, Any]]) -> None:

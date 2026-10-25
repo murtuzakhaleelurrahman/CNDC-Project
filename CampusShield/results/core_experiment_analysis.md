@@ -2,6 +2,7 @@
 
 Congestion source: `congestion_comparison_20261024T060539Z.csv`
 Failure source: `failure_recovery_20261024T070725Z.csv`
+OSPF source: `ospf_optimization_20261025T154113Z.csv`
 
 The congestion analysis uses 10 matched repetitions across 3 scenario(s). Values report sample standard deviation and two-sided 95% Student-t confidence intervals.
 
@@ -46,6 +47,15 @@ The congestion analysis uses 10 matched repetitions across 3 scenario(s). Values
 | Backup route convergence | 1892.073 +/- 37.598 ms [95% CI 1865.179 to 1918.967] | 1825.413 to 1948.264 ms |
 | Primary route restoration | 10479.833 +/- 18.020 ms [95% CI 10466.943 to 10492.723] | 10460.488 to 10524.204 ms |
 
+## OSPF optimization
+
+| Metric | Default OSPF | Tuned OSPF |
+|---|---:|---:|
+| Packets lost | 313.000 +/- 0.667 packets [95% CI 312.523 to 313.477] | 24.800 +/- 0.422 packets [95% CI 24.498 to 25.102] |
+| Service interruption | 32816.542 +/- 61.007 ms [95% CI 32772.904 to 32860.180] | 2697.388 +/- 46.550 ms [95% CI 2664.091 to 2730.685] |
+| Backup route convergence | 32615.573 +/- 79.824 ms [95% CI 32558.474 to 32672.671] | 2521.234 +/- 53.082 ms [95% CI 2483.264 to 2559.204] |
+| Primary route restoration | 9316.351 +/- 112.537 ms [95% CI 9235.852 to 9396.850] | 337.067 +/- 18.930 ms [95% CI 323.526 to 350.608] |
+
 ## Hypothesis evaluation
 
 | Hypothesis | Outcome | Evidence rule |
@@ -56,7 +66,7 @@ The congestion analysis uses 10 matched repetitions across 3 scenario(s). Values
 | H4 - Network recovery | Supported | ANRE mean NHS increases from congestion to the recovery phase. |
 | H5 - Bulk trade-off | Supported | ANRE increases emergency throughput while restricting bulk traffic. |
 | H6 - Routing recovery | Supported | Every failure repetition uses the backup route and restores the primary. |
-| H7 - Tuned OSPF | Not tested | This remains a Phase 3 routing experiment. |
+| H7 - Tuned OSPF | Supported | Tuned mean interruption 2697.388 ms versus default 32816.542 ms (+91.78% improvement). |
 
 ## Interpretation
 

@@ -26,7 +26,8 @@ If your prompt already begins with `(campusshield)`, the environment is active.
 | Experiment 1: healthy baseline | `sudo "$(which python3)" experiments/experiment_runner.py baseline --duration 30` | SQLite run, baseline CSV, baseline PNG |
 | Experiment 2: three-arm phased congestion | `sudo "$(which python3)" experiments/experiment_runner.py congestion --healthy-duration 10 --duration 30 --recovery-duration 20 --repetitions 10` | SQLite runs, comparison CSV and PNG |
 | Experiment 3: physical link failure and recovery | `sudo "$(which python3)" experiments/experiment_runner.py failure --repetitions 10 --timeout 20` | SQLite runs, recovery CSV and PNG |
-| Analyze Experiments 2 and 3 | `python3 experiments/analyze_results.py` | Summary CSV, analysis Markdown, summary PNG |
+| Experiment 4: default vs tuned OSPF | `sudo "$(which python3)" experiments/experiment_runner.py ospf --repetitions 10 --timeout 55` | SQLite runs, OSPF comparison CSV and PNG |
+| Analyze Experiments 2, 3, and 4 | `python3 experiments/analyze_results.py` | Summary CSV, analysis Markdown, summary PNG |
 
 Run only one Mininet experiment at a time.
 
@@ -93,9 +94,33 @@ Files: `results/failure_recovery_<group-id>.csv` and `results/failure_recovery_<
 
 `--repetitions 10` controls the number of fresh runs used for formal confidence intervals. `--timeout 20` is the maximum wait for each route change.
 
+## Experiment 4 - default versus tuned OSPF
+
+```bash
+source ~/.venvs/campusshield/bin/activate
+cd "/mnt/d/CNDC Project/CampusShield"
+sudo "$(which python3)" experiments/experiment_runner.py ospf --repetitions 10 --timeout 55
+```
+
+What it does: compares FRR's default neighbor-detection behavior with a tuned
+profile using matched, order-rotated fresh topologies. The R1-R2 link remains
+physically up but silently drops traffic, so OSPF must detect the failure from
+its Hello/dead timers. The tuned profile uses a 1-second dead interval, five
+Hellos per second, and 0/50/1000 ms SPF throttle timers.
+
+Expected final message: `OSPF OPTIMIZATION EXPERIMENT PASSED`
+
+Files: `results/ospf_optimization_<group-id>.csv` and
+`results/ospf_optimization_<group-id>.png`
+
+Use ten repetitions for the formal H7 result. For a pilot only, change
+`--repetitions 10` to `--repetitions 1`; keep `--timeout 55` because the
+default dead interval is approximately 40 seconds.
+
 ## Analyze repeated experiments
 
-Run this after completing ten matched congestion repetitions and ten failure repetitions:
+Run this after completing ten matched congestion repetitions, ten failure
+repetitions, and ten matched OSPF repetitions:
 
 ```bash
 source ~/.venvs/campusshield/bin/activate

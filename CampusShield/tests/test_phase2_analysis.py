@@ -33,6 +33,7 @@ class Phase2AnalysisTests(unittest.TestCase):
             output_root = Path(directory)
             congestion_path = output_root / "congestion.csv"
             failure_path = output_root / "failure.csv"
+            ospf_path = output_root / "ospf.csv"
             congestion_rows = []
             for repetition in range(1, 11):
                 for scenario_index, scenario in enumerate(SCENARIOS):
@@ -76,6 +77,30 @@ class Phase2AnalysisTests(unittest.TestCase):
                     for repetition in range(1, 11)
                 ]
             ).to_csv(failure_path, index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "group_id": "ospf-test",
+                        "repetition": repetition,
+                        "execution_order": 1 if repetition % 2 else 2,
+                        "scenario": scenario,
+                        "packets_lost_during_convergence": (
+                            400 + repetition if scenario == "OSPF_DEFAULT" else 12 + repetition
+                        ),
+                        "service_interruption_ms": (
+                            40_000 + repetition * 10 if scenario == "OSPF_DEFAULT" else 1_200 + repetition * 5
+                        ),
+                        "route_convergence_ms": (
+                            39_800 + repetition * 10 if scenario == "OSPF_DEFAULT" else 1_050 + repetition * 5
+                        ),
+                        "primary_restoration_ms": (
+                            10_000 + repetition if scenario == "OSPF_DEFAULT" else 1_500 + repetition
+                        ),
+                    }
+                    for repetition in range(1, 11)
+                    for scenario in ("OSPF_DEFAULT", "OSPF_TUNED")
+                ]
+            ).to_csv(ospf_path, index=False)
 
             arguments = [
                 "analyze_results.py",
@@ -83,6 +108,8 @@ class Phase2AnalysisTests(unittest.TestCase):
                 str(congestion_path),
                 "--failure-csv",
                 str(failure_path),
+                "--ospf-csv",
+                str(ospf_path),
             ]
             with patch.object(analyze_results, "RESULTS_ROOT", output_root), patch.object(
                 sys, "argv", arguments
@@ -99,11 +126,17 @@ class Phase2AnalysisTests(unittest.TestCase):
             self.assertTrue(congestion_summary["ci95_low"].notna().all())
             self.assertTrue(congestion_summary["ci95_high"].notna().all())
             self.assertTrue((congestion_summary["n"] == 10).all())
+            ospf_summary = summary[summary["experiment"] == "OSPF_OPTIMIZATION"]
+            self.assertEqual(
+                set(ospf_summary["scenario"]), {"OSPF_DEFAULT", "OSPF_TUNED"}
+            )
+            self.assertTrue((ospf_summary["n"] == 10).all())
             analysis = (output_root / "core_experiment_analysis.md").read_text(
                 encoding="utf-8"
             )
             self.assertIn("Tuned static", analysis)
             self.assertIn("95% CI", analysis)
+            self.assertIn("H7 - Tuned OSPF | Supported", analysis)
 
 
 if __name__ == "__main__":

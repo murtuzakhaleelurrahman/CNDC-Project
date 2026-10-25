@@ -17,6 +17,8 @@ VTY_ROOT = Path("/tmp/campusshield-frr")
 PRIMARY_LINK_ENDPOINTS = (("r1", "r1-eth0"), ("r2", "r2-eth0"))
 PRIMARY_COST = 10
 PENALIZED_COST = 100
+TUNED_HELLO_MULTIPLIER = 5
+TUNED_SPF_TIMERS_MS = (0, 50, 1_000)
 
 
 class RoutingAction(str, Enum):
@@ -166,6 +168,76 @@ def read_primary_link_costs(nodes: dict[str, Any]) -> dict[str, int]:
         match = re.search(r"Cost:\s*(\d+)", output)
         costs[router_name] = int(match.group(1)) if match else -1
     return costs
+
+
+def apply_tuned_ospf_profile(
+    nodes: dict[str, Any], hello_multiplier: int = TUNED_HELLO_MULTIPLIER
+) -> bool:
+    """Apply the measured Phase 3 fast-detection profile at runtime."""
+    if not 2 <= hello_multiplier <= 20:
+        raise ValueError("OSPF hello multiplier must be between 2 and 20")
+
+    all_valid = True
+    for router_name, interface in PRIMARY_LINK_ENDPOINTS:
+        output = _vtysh(
+            nodes[router_name],
+            [
+                "configure terminal",
+                f"interface {interface}",
+                (
+                    "ip ospf dead-interval minimal hello-multiplier "
+                    f"{hello_multiplier}"
+                ),
+            ],
+        )
+        if "%" in output or "failed" in output.lower():
+            info(
+                f"FAIL: tuning {router_name} {interface} OSPF timers: "
+                f"{output}\n"
+            )
+            all_valid = False
+
+    delay, initial_hold, maximum_hold = TUNED_SPF_TIMERS_MS
+    for router_name in ("r1", "r2", "r3"):
+        output = _vtysh(
+            nodes[router_name],
+            [
+                "configure terminal",
+                "router ospf",
+                (
+                    "timers throttle spf "
+                    f"{delay} {initial_hold} {maximum_hold}"
+                ),
+            ],
+        )
+        if "%" in output or "failed" in output.lower():
+            info(f"FAIL: tuning {router_name} SPF timers: {output}\n")
+            all_valid = False
+    return all_valid
+
+
+def validate_tuned_ospf_profile(
+    nodes: dict[str, Any], hello_multiplier: int = TUNED_HELLO_MULTIPLIER
+) -> bool:
+    """Confirm FRR retained the tuned interface and SPF commands."""
+    expected_dead = (
+        "ip ospf dead-interval minimal hello-multiplier "
+        f"{hello_multiplier}"
+    )
+    delay, initial_hold, maximum_hold = TUNED_SPF_TIMERS_MS
+    expected_spf = (
+        f"timers throttle spf {delay} {initial_hold} {maximum_hold}"
+    )
+
+    interface_ok = all(
+        expected_dead in _vtysh(nodes[router_name], ["show running-config"])
+        for router_name, _ in PRIMARY_LINK_ENDPOINTS
+    )
+    spf_ok = all(
+        expected_spf in _vtysh(nodes[router_name], ["show running-config"])
+        for router_name in ("r1", "r2", "r3")
+    )
+    return interface_ok and spf_ok
 
 
 def validate_routing_hold_down_logic() -> bool:

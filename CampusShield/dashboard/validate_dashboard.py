@@ -34,7 +34,11 @@ def main() -> int:
         print("FAIL: run list loaded")
         return 1
 
-    run_id = int(runs[0]["id"])
+    telemetry_run = next(
+        (run for run in runs if int(run.get("telemetry_count") or 0) > 0),
+        runs[0],
+    )
+    run_id = int(telemetry_run["id"])
     checks["latest telemetry loaded"] = (
         load_latest_telemetry(database_path, run_id) is not None
     )
@@ -53,6 +57,11 @@ def main() -> int:
     # Plotly and Streamlit imports can be slow from a WSL-mounted Windows
     # project, so allow enough time for a cold validation run.
     app.run(timeout=45)
+    run_selector = next(
+        (widget for widget in app.selectbox if widget.label == "Run"), None
+    )
+    if run_selector is not None and run_id in run_selector.options:
+        run_selector.set_value(run_id).run(timeout=45)
     checks["Streamlit rendered without exception"] = not list(app.exception)
     checks["dashboard title rendered"] = any(
         "CampusShield" in item.value for item in app.markdown
@@ -70,7 +79,7 @@ def main() -> int:
             "Network health", "cs-score", "RTT", "Packet loss", "Jitter",
             "Utilization",
         )
-    )
+    ) or "No telemetry is stored for this run" in rendered_markup
     checks["redundant overview copy removed"] = all(
         text not in rendered_markup
         for text in (
@@ -79,7 +88,10 @@ def main() -> int:
             "Reason: Failure",
         )
     )
-    checks["decision reason uses panel styling"] = "Evidence note" in rendered_markup
+    checks["decision reason uses panel styling"] = (
+        "Evidence note" in rendered_markup
+        or "No telemetry is stored for this run" in rendered_markup
+    )
 
     app.radio[0].set_value("QoS").run(timeout=45)
     qos_markup = "\n".join(item.value for item in app.markdown)
@@ -91,6 +103,11 @@ def main() -> int:
     experiment_markup = "\n".join(item.value for item in app.markdown)
     checks["three-arm experiment view rendered"] = (
         not list(app.exception) and "Three-arm adaptive comparison" in experiment_markup
+    )
+    checks["OSPF optimization view rendered"] = (
+        not list(app.exception)
+        and "OSPF optimization" in experiment_markup
+        and "Measured OSPF comparison" in experiment_markup
     )
 
     for description, passed in checks.items():

@@ -19,6 +19,11 @@ RESULTS_ROOT = PROJECT_ROOT / "results"
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from experiments.congestion_design import SCENARIOS  # noqa: E402
+from experiments.ospf_design import (  # noqa: E402
+    SCENARIOS as OSPF_SCENARIOS,
+    h7_supported,
+    recovery_improvement_percent,
+)
 from experiments.statistics_utils import (  # noqa: E402
     DescriptiveStatistics,
     describe_95,
@@ -39,6 +44,11 @@ def _latest(pattern: str) -> Path:
     return matches[-1]
 
 
+def _latest_optional(pattern: str) -> Path | None:
+    matches = sorted(RESULTS_ROOT.glob(pattern))
+    return matches[-1] if matches else None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -52,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="failure-recovery CSV (default: latest result)",
+    )
+    parser.add_argument(
+        "--ospf-csv",
+        type=Path,
+        default=None,
+        help="default-vs-tuned OSPF CSV (default: latest result, if available)",
     )
     parser.add_argument(
         "--minimum-repetitions",
@@ -112,8 +128,10 @@ def main() -> int:
         raise ValueError("Minimum repetitions must be at least 2 for confidence intervals")
     congestion_path = args.congestion_csv or _latest("congestion_comparison_*.csv")
     failure_path = args.failure_csv or _latest("failure_recovery_*.csv")
+    ospf_path = args.ospf_csv or _latest_optional("ospf_optimization_*.csv")
     congestion = pd.read_csv(congestion_path)
     failure = pd.read_csv(failure_path)
+    ospf = pd.read_csv(ospf_path) if ospf_path is not None else None
 
     scenarios = _validate_repetitions(congestion, args.minimum_repetitions)
     if len(failure) < args.minimum_repetitions:
@@ -121,6 +139,21 @@ def main() -> int:
             f"Failure input has {len(failure)} repetition(s); at least "
             f"{args.minimum_repetitions} are required"
         )
+    if ospf is not None:
+        ospf_repetitions = {
+            scenario: set(
+                ospf.loc[ospf["scenario"] == scenario, "repetition"]
+            )
+            for scenario in OSPF_SCENARIOS
+        }
+        common_ospf = set.intersection(*ospf_repetitions.values())
+        if any(values != common_ospf for values in ospf_repetitions.values()):
+            raise ValueError("OSPF input has incomplete matched profile repetitions")
+        if len(common_ospf) < args.minimum_repetitions:
+            raise ValueError(
+                f"OSPF input has {len(common_ospf)} complete repetition(s); "
+                f"at least {args.minimum_repetitions} are required"
+            )
 
     metric_definitions = [
         ("emergency_throughput_mbps", "Emergency throughput", "Mbps"),
@@ -215,6 +248,36 @@ def main() -> int:
             }
         )
 
+    ospf_metrics = (
+        ("packets_lost_during_convergence", "Packets lost", "packets"),
+        ("service_interruption_ms", "Service interruption", "ms"),
+        ("route_convergence_ms", "Backup route convergence", "ms"),
+        ("primary_restoration_ms", "Primary route restoration", "ms"),
+    )
+    ospf_statistics: dict[str, dict[str, DescriptiveStatistics]] = {}
+    if ospf is not None:
+        for metric, label, unit in ospf_metrics:
+            ospf_statistics[metric] = {}
+            for scenario in OSPF_SCENARIOS:
+                item = _scenario_stats(ospf, scenario, metric)
+                ospf_statistics[metric][scenario] = item
+                rows.append(
+                    {
+                        "experiment": "OSPF_OPTIMIZATION",
+                        "scenario": scenario,
+                        "metric": metric,
+                        "label": label,
+                        "unit": unit,
+                        "n": item.count,
+                        "mean": item.mean,
+                        "std": item.standard_deviation,
+                        "ci95_low": item.ci95_low,
+                        "ci95_high": item.ci95_high,
+                        "minimum": item.minimum,
+                        "maximum": item.maximum,
+                    }
+                )
+
     controller_timings = (
         ("controller_response_seconds", "ANRE response time"),
         ("recovery_to_normal_seconds", "ANRE recovery-to-NORMAL time"),
@@ -291,12 +354,28 @@ def main() -> int:
             "Every failure repetition uses the backup route and restores the primary.",
         ),
     ]
+    h7_result: bool | None = None
+    h7_evidence = "The Phase 3 OSPF optimization experiment has not been run."
+    if ospf is not None:
+        default_recovery = ospf_statistics["service_interruption_ms"][
+            "OSPF_DEFAULT"
+        ].mean
+        tuned_recovery = ospf_statistics["service_interruption_ms"][
+            "OSPF_TUNED"
+        ].mean
+        h7_result = h7_supported(default_recovery, tuned_recovery)
+        improvement = recovery_improvement_percent(default_recovery, tuned_recovery)
+        h7_evidence = (
+            f"Tuned mean interruption {tuned_recovery:.3f} ms versus default "
+            f"{default_recovery:.3f} ms ({improvement:+.2f}% improvement)."
+        )
 
     lines = [
         "# CampusShield Core Experimental Analysis",
         "",
         f"Congestion source: `{congestion_path.name}`",
         f"Failure source: `{failure_path.name}`",
+        f"OSPF source: `{ospf_path.name}`" if ospf_path else "OSPF source: not available",
         "",
         f"The congestion analysis uses {len(set(congestion['repetition']))} matched "
         f"repetitions across {len(scenarios)} scenario(s). Values report sample "
@@ -356,6 +435,23 @@ def main() -> int:
             f"{item.minimum:.3f} to {item.maximum:.3f} {unit} |"
         )
 
+    if ospf is not None:
+        lines.extend(
+            [
+                "",
+                "## OSPF optimization",
+                "",
+                "| Metric | Default OSPF | Tuned OSPF |",
+                "|---|---:|---:|",
+            ]
+        )
+        for metric, label, unit in ospf_metrics:
+            lines.append(
+                f"| {label} | "
+                f"{_format_estimate(ospf_statistics[metric]['OSPF_DEFAULT'], unit)} | "
+                f"{_format_estimate(ospf_statistics[metric]['OSPF_TUNED'], unit)} |"
+            )
+
     lines.extend(
         [
             "",
@@ -369,9 +465,14 @@ def main() -> int:
         lines.append(
             f"| {name} | {'Supported' if supported else 'Not supported'} | {evidence} |"
         )
+    h7_outcome = (
+        "Not tested"
+        if h7_result is None
+        else ("Supported" if h7_result else "Not supported")
+    )
     lines.extend(
         [
-            "| H7 - Tuned OSPF | Not tested | This remains a Phase 3 routing experiment. |",
+            f"| H7 - Tuned OSPF | {h7_outcome} | {h7_evidence} |",
             "",
             "## Interpretation",
             "",
@@ -440,7 +541,7 @@ def main() -> int:
     print(f"Failure group: {failure['group_id'].iloc[0]}")
     for name, supported, _ in hypotheses:
         print(f"{'SUPPORTED' if supported else 'NOT SUPPORTED'}: {name}")
-    print("NOT TESTED: H7 - Tuned OSPF")
+    print(f"{h7_outcome.upper()}: H7 - Tuned OSPF")
     print(f"Summary CSV: {summary_csv}")
     print(f"Analysis: {analysis_md}")
     print(f"Graph: {graph_path}")

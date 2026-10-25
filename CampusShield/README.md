@@ -576,6 +576,50 @@ Successful collection ends with:
 LINK FAILURE EXPERIMENT PASSED
 ```
 
+## Run Experiment 4 - default versus tuned OSPF
+
+Phase 3 tests the proposal's H7 rather than assuming that faster timers are
+better. Each matched repetition uses two fresh topologies and alternates their
+execution order:
+
+- `OSPF_DEFAULT`: FRR defaults (10-second Hello, 40-second dead interval);
+- `OSPF_TUNED`: a 1-second minimal dead interval with five Hellos per second,
+  plus 0/50/1000 ms SPF throttle timers.
+
+The runner silently drops all traffic on R1-R2 while leaving its carrier up.
+This forces OSPF to detect a missing neighbor from Hello/dead timers instead of
+receiving an immediate interface-down signal. Continuous 100 ms probes measure
+packets lost, service interruption, backup convergence, and primary-route
+restoration.
+
+```bash
+source ~/.venvs/campusshield/bin/activate
+cd "/mnt/d/CNDC Project/CampusShield"
+sudo "$(which python3)" experiments/experiment_runner.py ospf \
+  --repetitions 10 \
+  --timeout 55
+```
+
+For a pilot workflow check, use one repetition. It still takes roughly a
+minute for the default profile to declare the silent neighbor dead:
+
+```bash
+sudo "$(which python3)" experiments/experiment_runner.py ospf \
+  --repetitions 1 \
+  --timeout 55
+```
+
+The paired evidence is written to:
+
+```text
+results/ospf_optimization_<group-id>.csv
+results/ospf_optimization_<group-id>.png
+```
+
+Successful collection ends with `OSPF OPTIMIZATION EXPERIMENT PASSED`. H7 is
+supported only when the measured tuned mean service interruption is lower than
+the measured default mean.
+
 ## Analyze the repeated core experiments
 
 After the ten-repetition three-arm congestion command and the repeated failure
@@ -587,10 +631,10 @@ cd "/mnt/d/CNDC Project/CampusShield"
 python3 experiments/analyze_results.py
 ```
 
-The analyzer requires ten complete matched congestion repetitions and ten
-failure repetitions by default. It reports means, sample standard
+When Phase 3 evidence exists, the analyzer also requires ten complete matched
+default/tuned OSPF repetitions. It reports means, sample standard
 deviations, two-sided 95% Student-t confidence intervals, adaptive-versus-basic
-changes, and adaptive-versus-tuned changes. For a legacy or pilot dataset, the
+changes, adaptive-versus-tuned changes, and the measured H7 outcome. For a legacy or pilot dataset, the
 minimum may be lowered explicitly, for example
 `--minimum-repetitions 3`; such output is not the formal Phase 2 result.
 

@@ -47,6 +47,10 @@ from controller.qos_manager import (  # noqa: E402
     validate_qos_policy,
     validate_static_qos,
 )
+from controller.routing_manager import (  # noqa: E402
+    apply_tuned_ospf_profile,
+    validate_tuned_ospf_profile,
+)
 from database.storage import (  # noqa: E402
     DEFAULT_DATABASE_PATH,
     CampusShieldDatabase,
@@ -62,6 +66,17 @@ from experiments.congestion_design import (  # noqa: E402
     scenario_order_for_repetition,
 )
 from experiments.statistics_utils import describe_95  # noqa: E402
+from experiments.ospf_design import (  # noqa: E402
+    SCENARIOS as OSPF_SCENARIOS,
+    TUNED_DEAD_INTERVAL_SECONDS,
+    TUNED_HELLO_MULTIPLIER,
+    TUNED_SPF_DELAY_MS,
+    TUNED_SPF_INITIAL_HOLD_MS,
+    TUNED_SPF_MAX_HOLD_MS,
+    h7_supported,
+    recovery_improvement_percent,
+    scenario_order_for_repetition as ospf_scenario_order,
+)
 from telemetry.telemetry_worker import collect_snapshot  # noqa: E402
 from topology.campus_topology import (  # noqa: E402
     CORE_BANDWIDTH_MBPS,
@@ -161,6 +176,27 @@ def parse_args() -> argparse.Namespace:
         help="maximum seconds to wait for each route change (default: 20)",
     )
     failure.add_argument(
+        "--database",
+        type=Path,
+        default=DEFAULT_DATABASE_PATH,
+        help="SQLite database path",
+    )
+    ospf = subcommands.add_parser(
+        "ospf", help="compare default and tuned OSPF recovery under silent failure"
+    )
+    ospf.add_argument(
+        "--repetitions",
+        type=int,
+        default=10,
+        help="matched, order-rotated repetitions per profile (default: 10)",
+    )
+    ospf.add_argument(
+        "--timeout",
+        type=float,
+        default=55.0,
+        help="maximum seconds to wait for each route change (default: 55)",
+    )
+    ospf.add_argument(
         "--database",
         type=Path,
         default=DEFAULT_DATABASE_PATH,
@@ -1476,6 +1512,404 @@ def run_failure_experiment(
     return True
 
 
+PRIMARY_SILENT_FAILURE_ENDPOINTS = (("r1", "r1-eth0"), ("r2", "r2-eth0"))
+
+
+def _set_primary_silent_failure(nodes: dict[str, Any], enabled: bool) -> None:
+    """Blackhole the direct link without changing its carrier state."""
+    rules = (
+        ("INPUT", "-i"),
+        ("OUTPUT", "-o"),
+        ("FORWARD", "-i"),
+        ("FORWARD", "-o"),
+    )
+    operation = "-I" if enabled else "-D"
+    for router_name, interface in PRIMARY_SILENT_FAILURE_ENDPOINTS:
+        node = nodes[router_name]
+        for chain, direction in rules:
+            output = node.cmd(
+                f"iptables -w {operation} {chain} "
+                f"{direction} {interface} -j DROP 2>&1"
+            )
+            if enabled and output.strip():
+                raise RuntimeError(
+                    f"Could not inject silent failure on {router_name}: {output.strip()}"
+                )
+
+
+def _wait_for_route(
+    router: Any, destination: str, expected: str, timeout_seconds: float
+) -> tuple[str, float]:
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    latest = ""
+    while time.monotonic() < deadline:
+        matched, latest = route_uses(router, destination, expected)
+        if matched:
+            return latest, time.monotonic() - started
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"Route containing '{expected}' was not installed within "
+        f"{timeout_seconds:.1f} seconds; last route: {latest or 'none'}"
+    )
+
+
+def _run_ospf_profile_repetition(
+    *,
+    database_path: Path,
+    group_id: str,
+    repetition: int,
+    scenario: str,
+    execution_order: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    net = None
+    nodes: dict[str, Any] = {}
+    database: CampusShieldDatabase | None = None
+    run_id: int | None = None
+    ping_process = None
+    failure_active = False
+    try:
+        database = CampusShieldDatabase(database_path)
+        profile_name = "Tuned" if scenario == "OSPF_TUNED" else "Default"
+        run_id = database.start_run(
+            f"Experiment 4 - {profile_name} OSPF - repetition {repetition}",
+            scenario,
+            is_experimental=True,
+            notes=(
+                f"ospf_group={group_id}; repetition={repetition}; "
+                f"execution_order={execution_order}; silent R1-R2 blackhole"
+            ),
+        )
+        database.log_event(
+            run_id,
+            EventRecord(
+                component="EXPERIMENT",
+                event_type="OSPF_PROFILE_EXPERIMENT_START",
+                message=f"{profile_name} OSPF silent-failure trial started",
+                metadata={
+                    "group_id": group_id,
+                    "repetition": repetition,
+                    "execution_order": execution_order,
+                    "scenario": scenario,
+                },
+            ),
+        )
+
+        info(
+            f"\n*** Phase 3 repetition {repetition}, order {execution_order}: "
+            f"{scenario}\n"
+        )
+        net, nodes = build_network()
+        routers = [nodes["r1"], nodes["r2"], nodes["r3"]]
+        for router in routers:
+            start_frr(router)
+        if scenario == "OSPF_TUNED":
+            if not apply_tuned_ospf_profile(nodes):
+                raise RuntimeError("FRR rejected the tuned OSPF profile")
+        if not wait_for_ospf(routers, timeout=60):
+            raise RuntimeError("OSPF did not converge before failure injection")
+        if scenario == "OSPF_TUNED" and not validate_tuned_ospf_profile(nodes):
+            raise RuntimeError("Tuned OSPF profile could not be verified")
+
+        direct_ok, route_before = route_uses(
+            nodes["r1"], "10.10.20.10", "via 10.10.255.2"
+        )
+        if not direct_ok:
+            raise RuntimeError("R1-R2 was not the primary route before failure")
+        neighbors_before = vtysh_command(
+            nodes["r1"], "show ip ospf neighbor"
+        ).count("Full")
+
+        ping_process = nodes["emergency1"].popen(
+            ["ping", "-D", "-n", "-i", "0.1", "10.10.20.10"]
+        )
+        time.sleep(2.0)
+        failure_epoch = time.time()
+        failure_timestamp = datetime.fromtimestamp(
+            failure_epoch, tz=timezone.utc
+        ).isoformat()
+        _set_primary_silent_failure(nodes, True)
+        failure_active = True
+        database.log_event(
+            run_id,
+            EventRecord(
+                component="ROUTING",
+                event_type="SILENT_LINK_FAILURE",
+                timestamp_utc=failure_timestamp,
+                message="R1-R2 traffic silently blackholed while carrier remained up",
+                action="BLACKHOLE_ENABLE",
+                link_name="R1-R2",
+                old_value="forwarding",
+                new_value="silent_drop",
+                metadata={"route_before": route_before, "scenario": scenario},
+            ),
+        )
+
+        route_after_failure, convergence_seconds = _wait_for_route(
+            nodes["r1"], "10.10.20.10", "via 10.10.255.6", timeout_seconds
+        )
+        backup_epoch = time.time()
+        neighbors_after_failure = vtysh_command(
+            nodes["r1"], "show ip ospf neighbor"
+        ).count("Full")
+        database.log_event(
+            run_id,
+            EventRecord(
+                component="OSPF",
+                event_type="BACKUP_ROUTE_CONVERGED",
+                message="OSPF installed the R1-R3-R2 route after silent failure",
+                action="OSPF_FAILOVER",
+                link_name="R1-R2",
+                metadata={
+                    "convergence_seconds": convergence_seconds,
+                    "route": route_after_failure,
+                },
+            ),
+        )
+
+        time.sleep(1.0)
+        restore_started = time.monotonic()
+        _set_primary_silent_failure(nodes, False)
+        failure_active = False
+        route_restored, restoration_seconds = _wait_for_route(
+            nodes["r1"], "10.10.20.10", "via 10.10.255.2", timeout_seconds
+        )
+        restoration_seconds = time.monotonic() - restore_started
+        database.log_event(
+            run_id,
+            EventRecord(
+                component="OSPF",
+                event_type="PRIMARY_ROUTE_RESTORED",
+                message="OSPF restored the direct route after silent failure removal",
+                action="ROUTE_RESTORE",
+                link_name="R1-R2",
+                metadata={"restoration_seconds": restoration_seconds},
+            ),
+        )
+
+        time.sleep(1.0)
+        ping_process.terminate()
+        stdout, _ = ping_process.communicate(timeout=3)
+        ping_process = None
+        ping_output = stdout.decode() if isinstance(stdout, bytes) else stdout
+        replies = _ping_replies(ping_output)
+        interruption_seconds, packets_lost, last_success, first_success = _failure_gap(
+            replies, failure_epoch, backup_epoch
+        )
+
+        if scenario == "OSPF_TUNED":
+            dead_interval = TUNED_DEAD_INTERVAL_SECONDS
+            hello_multiplier = TUNED_HELLO_MULTIPLIER
+            spf_delay = TUNED_SPF_DELAY_MS
+            spf_initial = TUNED_SPF_INITIAL_HOLD_MS
+            spf_maximum = TUNED_SPF_MAX_HOLD_MS
+        else:
+            dead_interval = 40.0
+            hello_multiplier = 0
+            spf_delay = 0
+            spf_initial = 50
+            spf_maximum = 5_000
+
+        summary = {
+            "group_id": group_id,
+            "repetition": repetition,
+            "execution_order": execution_order,
+            "scenario": scenario,
+            "run_id": run_id,
+            "failure_timestamp_utc": failure_timestamp,
+            "dead_interval_seconds": dead_interval,
+            "hello_multiplier": hello_multiplier,
+            "spf_delay_ms": spf_delay,
+            "spf_initial_hold_ms": spf_initial,
+            "spf_max_hold_ms": spf_maximum,
+            "packets_lost_during_convergence": packets_lost,
+            "service_interruption_ms": interruption_seconds * 1_000,
+            "route_convergence_ms": convergence_seconds * 1_000,
+            "primary_restoration_ms": restoration_seconds * 1_000,
+            "last_success_before_outage_utc": datetime.fromtimestamp(
+                float(last_success["timestamp"]), tz=timezone.utc
+            ).isoformat(),
+            "first_success_after_outage_utc": datetime.fromtimestamp(
+                float(first_success["timestamp"]), tz=timezone.utc
+            ).isoformat(),
+            "route_before": route_before,
+            "route_after_failure": route_after_failure,
+            "route_after_restoration": route_restored,
+            "full_neighbors_before": neighbors_before,
+            "full_neighbors_after_failure": neighbors_after_failure,
+        }
+        units = {
+            "packets_lost_during_convergence": "packets",
+            "service_interruption_ms": "ms",
+            "route_convergence_ms": "ms",
+            "primary_restoration_ms": "ms",
+            "full_neighbors_before": "count",
+            "full_neighbors_after_failure": "count",
+        }
+        for metric_name, unit in units.items():
+            database.log_result(
+                run_id,
+                scenario=scenario,
+                metric_name=metric_name,
+                metric_value=float(summary[metric_name]),
+                unit=unit,
+            )
+        database.log_event(
+            run_id,
+            EventRecord(
+                component="EXPERIMENT",
+                event_type="OSPF_PROFILE_EXPERIMENT_COMPLETE",
+                message=f"{profile_name} OSPF recovery measured",
+                metadata={
+                    "packets_lost": packets_lost,
+                    "service_interruption_ms": interruption_seconds * 1_000,
+                },
+            ),
+        )
+        database.finish_run(run_id, "COMPLETED")
+        info(
+            f"*** {scenario}: lost={packets_lost}, "
+            f"interruption={interruption_seconds * 1000:.1f} ms, "
+            f"convergence={convergence_seconds * 1000:.1f} ms\n"
+        )
+        return summary
+    except Exception as error:
+        info(f"*** {scenario} repetition {repetition} FAILED: {error}\n")
+        if database is not None and run_id is not None:
+            try:
+                database.log_event(
+                    run_id,
+                    EventRecord(
+                        component="EXPERIMENT",
+                        event_type="EXPERIMENT_FAILURE",
+                        severity="ERROR",
+                        message=str(error),
+                    ),
+                )
+                database.finish_run(run_id, "FAILED")
+            except Exception:
+                pass
+        raise
+    finally:
+        if ping_process is not None:
+            try:
+                ping_process.terminate()
+                ping_process.communicate(timeout=2)
+            except Exception:
+                pass
+        if failure_active and nodes:
+            try:
+                _set_primary_silent_failure(nodes, False)
+            except Exception:
+                pass
+        for router_name in ("r1", "r2", "r3"):
+            if router_name in nodes:
+                stop_frr(nodes[router_name])
+        if net is not None:
+            net.stop()
+        if database is not None:
+            database.close()
+
+
+def _save_ospf_artifacts(
+    group_id: str, summaries: list[dict[str, Any]]
+) -> tuple[Path, Path]:
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    csv_path = RESULTS_ROOT / f"ospf_optimization_{group_id}.csv"
+    graph_path = RESULTS_ROOT / f"ospf_optimization_{group_id}.png"
+    frame = pd.DataFrame(summaries)
+    frame.to_csv(csv_path, index=False)
+    matched_repetitions = int(frame["repetition"].nunique())
+    evidence_label = "Formal" if matched_repetitions >= 10 else "Pilot"
+
+    metrics = (
+        ("service_interruption_ms", "Service interruption", "Milliseconds"),
+        ("packets_lost_during_convergence", "Packets lost", "Packets"),
+        ("route_convergence_ms", "Backup convergence", "Milliseconds"),
+        ("primary_restoration_ms", "Primary restoration", "Milliseconds"),
+    )
+    colors = {"OSPF_DEFAULT": "#64748b", "OSPF_TUNED": "#38bdf8"}
+    figure, axes = plt.subplots(2, 2, figsize=(10, 7), constrained_layout=True)
+    figure.suptitle(
+        f"CampusShield Experiment 4 - OSPF Optimization ({evidence_label}, "
+        f"n={matched_repetitions}; {group_id})"
+    )
+    for axis, (metric, title, unit) in zip(axes.flat, metrics):
+        for scenario in OSPF_SCENARIOS:
+            sample = frame.loc[frame["scenario"] == scenario, metric]
+            stats = describe_95(sample)
+            axis.bar(
+                scenario.replace("OSPF_", ""),
+                stats.mean,
+                yerr=[[stats.mean - stats.ci95_low], [stats.ci95_high - stats.mean]],
+                capsize=5,
+                color=colors[scenario],
+            )
+        axis.set(title=title, ylabel=unit)
+        axis.grid(axis="y", alpha=0.25)
+    figure.savefig(graph_path, dpi=160)
+    plt.close(figure)
+    return csv_path, graph_path
+
+
+def run_ospf_optimization(
+    repetitions: int, timeout_seconds: float, database_path: Path
+) -> bool:
+    if os.geteuid() != 0:
+        raise PermissionError("Mininet experiments must be run with sudo")
+    if repetitions < 1:
+        raise ValueError("Repetitions must be at least 1")
+    if timeout_seconds < 45:
+        raise ValueError("OSPF timeout must be at least 45 seconds for the default profile")
+
+    group_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    info(
+        f"*** Experiment 4 group {group_id}; {repetitions} matched repetition(s) "
+        "of default and tuned OSPF\n"
+    )
+    summaries: list[dict[str, Any]] = []
+    for repetition in range(1, repetitions + 1):
+        for execution_order, scenario in enumerate(
+            ospf_scenario_order(repetition), start=1
+        ):
+            summaries.append(
+                _run_ospf_profile_repetition(
+                    database_path=database_path,
+                    group_id=group_id,
+                    repetition=repetition,
+                    scenario=scenario,
+                    execution_order=execution_order,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+
+    csv_path, graph_path = _save_ospf_artifacts(group_id, summaries)
+    frame = pd.DataFrame(summaries)
+    means = frame.groupby("scenario").mean(numeric_only=True)
+    default_ms = float(means.loc["OSPF_DEFAULT", "service_interruption_ms"])
+    tuned_ms = float(means.loc["OSPF_TUNED", "service_interruption_ms"])
+    improvement = recovery_improvement_percent(default_ms, tuned_ms)
+    outcome = "SUPPORTED" if h7_supported(default_ms, tuned_ms) else "NOT SUPPORTED"
+    info("\n*** Experiment 4 measured comparison\n")
+    for scenario in OSPF_SCENARIOS:
+        sample = frame.loc[frame["scenario"] == scenario, "service_interruption_ms"]
+        stats = describe_95(sample)
+        lost = means.loc[scenario, "packets_lost_during_convergence"]
+        info(
+            f"{scenario}: interruption={stats.mean:.2f} ms "
+            f"(95% CI {stats.ci95_low:.2f}-{stats.ci95_high:.2f}), "
+            f"packets lost={lost:.2f}\n"
+        )
+    info(
+        f"H7: {outcome}; tuned recovery change={improvement:.2f}%\n"
+        f"Results CSV: {csv_path}\n"
+        f"Results graph: {graph_path}\n"
+        "*** OSPF OPTIMIZATION EXPERIMENT PASSED\n"
+    )
+    return True
+
+
 def main() -> int:
     args = parse_args()
     setLogLevel("info")
@@ -1497,6 +1931,10 @@ def main() -> int:
             ) else 1
         if args.experiment == "failure":
             return 0 if run_failure_experiment(
+                args.repetitions, args.timeout, args.database
+            ) else 1
+        if args.experiment == "ospf":
+            return 0 if run_ospf_optimization(
                 args.repetitions, args.timeout, args.database
             ) else 1
         return 1
