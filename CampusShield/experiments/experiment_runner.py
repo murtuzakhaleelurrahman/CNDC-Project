@@ -66,6 +66,9 @@ from experiments.congestion_design import (  # noqa: E402
     scenario_order_for_repetition,
 )
 from experiments.statistics_utils import describe_95  # noqa: E402
+from experiments.adaptive_routing_experiment import (  # noqa: E402
+    run_adaptive_routing_experiment,
+)
 from experiments.ospf_design import (  # noqa: E402
     SCENARIOS as OSPF_SCENARIOS,
     TUNED_DEAD_INTERVAL_SECONDS,
@@ -197,6 +200,28 @@ def parse_args() -> argparse.Namespace:
         help="maximum seconds to wait for each route change (default: 55)",
     )
     ospf.add_argument(
+        "--database",
+        type=Path,
+        default=DEFAULT_DATABASE_PATH,
+        help="SQLite database path",
+    )
+    adaptive_routing = subcommands.add_parser(
+        "adaptive-routing",
+        help="measure the closed-loop ANRE and OSPF-cost response to degradation",
+    )
+    adaptive_routing.add_argument(
+        "--repetitions",
+        type=int,
+        default=10,
+        help="fresh-topology repetitions (default: 10)",
+    )
+    adaptive_routing.add_argument(
+        "--hold-down",
+        type=float,
+        default=45.0,
+        help="routing recovery hold-down in seconds (default: 45)",
+    )
+    adaptive_routing.add_argument(
         "--database",
         type=Path,
         default=DEFAULT_DATABASE_PATH,
@@ -1936,6 +1961,10 @@ def main() -> int:
         if args.experiment == "ospf":
             return 0 if run_ospf_optimization(
                 args.repetitions, args.timeout, args.database
+            ) else 1
+        if args.experiment == "adaptive-routing":
+            return 0 if run_adaptive_routing_experiment(
+                args.repetitions, args.hold_down, args.database
             ) else 1
         return 1
     finally:

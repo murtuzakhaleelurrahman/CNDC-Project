@@ -109,6 +109,11 @@ def main() -> int:
         and "OSPF optimization" in experiment_markup
         and "Measured OSPF comparison" in experiment_markup
     )
+    checks["closed-loop adaptive routing view rendered"] = (
+        not list(app.exception)
+        and "Closed-loop adaptive routing" in experiment_markup
+        and "Closed-loop evidence" in experiment_markup
+    )
 
     for description, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'}: {description}")

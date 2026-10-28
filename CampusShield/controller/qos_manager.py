@@ -44,6 +44,8 @@ CORE_INTERFACES = (
     ("r3", "r3-eth1"),
 )
 
+PRIMARY_LINK_INTERFACES = (("r1", "r1-eth0"), ("r2", "r2-eth0"))
+
 
 def _run_tc(node: Any, command: str) -> tuple[bool, str]:
     output = node.cmd(f"tc {command} 2>&1")
@@ -204,6 +206,55 @@ def validate_static_qos(nodes: dict[str, Any]) -> bool:
         )
         all_valid = all_valid and valid
 
+    return all_valid
+
+
+def set_primary_link_impairment(
+    nodes: dict[str, Any], *, delay_ms: int, loss_percent: float
+) -> bool:
+    """Change every QoS leaf's netem settings on the live R1-R2 link."""
+    if delay_ms < 0:
+        raise ValueError("Delay must not be negative")
+    if not 0 <= loss_percent <= 100:
+        raise ValueError("Loss percentage must be between 0 and 100")
+
+    all_valid = True
+    for router_name, interface in PRIMARY_LINK_INTERFACES:
+        node = nodes[router_name]
+        device = shlex.quote(interface)
+        for qos_class in NORMAL_QOS_CLASSES:
+            command = (
+                f"qdisc change dev {device} parent 10:{qos_class.class_id} "
+                f"handle {qos_class.class_id}0: netem delay {delay_ms}ms "
+                f"loss {loss_percent:.3f}%"
+            )
+            success, output = _run_tc(node, command)
+            if not success:
+                info(
+                    f"FAIL: impairing {router_name} {interface} "
+                    f"{qos_class.name}: {output}\n"
+                )
+                all_valid = False
+    return all_valid
+
+
+def validate_primary_link_impairment(
+    nodes: dict[str, Any], *, delay_ms: int, loss_percent: float
+) -> bool:
+    """Confirm all three class queues retain the requested netem impairment."""
+    expected_delay = f"delay {delay_ms}ms"
+    expected_loss = f"loss {loss_percent:g}%"
+    all_valid = True
+    for router_name, interface in PRIMARY_LINK_INTERFACES:
+        output = nodes[router_name].cmd(
+            f"tc qdisc show dev {shlex.quote(interface)}"
+        )
+        valid = (
+            output.count("netem") >= 3
+            and output.count(expected_delay) >= 3
+            and (loss_percent == 0 or output.count(expected_loss) >= 3)
+        )
+        all_valid = all_valid and valid
     return all_valid
 
 

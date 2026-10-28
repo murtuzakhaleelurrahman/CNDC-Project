@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         help="default-vs-tuned OSPF CSV (default: latest result, if available)",
     )
     parser.add_argument(
+        "--adaptive-routing-csv",
+        type=Path,
+        default=None,
+        help="closed-loop adaptive-routing CSV (default: latest result, if available)",
+    )
+    parser.add_argument(
         "--minimum-repetitions",
         type=int,
         default=10,
@@ -129,9 +135,15 @@ def main() -> int:
     congestion_path = args.congestion_csv or _latest("congestion_comparison_*.csv")
     failure_path = args.failure_csv or _latest("failure_recovery_*.csv")
     ospf_path = args.ospf_csv or _latest_optional("ospf_optimization_*.csv")
+    adaptive_path = args.adaptive_routing_csv or _latest_optional(
+        "adaptive_routing_*.csv"
+    )
     congestion = pd.read_csv(congestion_path)
     failure = pd.read_csv(failure_path)
     ospf = pd.read_csv(ospf_path) if ospf_path is not None else None
+    adaptive_routing = (
+        pd.read_csv(adaptive_path) if adaptive_path is not None else None
+    )
 
     scenarios = _validate_repetitions(congestion, args.minimum_repetitions)
     if len(failure) < args.minimum_repetitions:
@@ -154,6 +166,15 @@ def main() -> int:
                 f"OSPF input has {len(common_ospf)} complete repetition(s); "
                 f"at least {args.minimum_repetitions} are required"
             )
+    if (
+        adaptive_routing is not None
+        and adaptive_routing["repetition"].nunique() < args.minimum_repetitions
+    ):
+        raise ValueError(
+            f"Adaptive-routing input has "
+            f"{adaptive_routing['repetition'].nunique()} "
+            f"repetition(s); at least {args.minimum_repetitions} are required"
+        )
 
     metric_definitions = [
         ("emergency_throughput_mbps", "Emergency throughput", "Mbps"),
@@ -278,6 +299,35 @@ def main() -> int:
                     }
                 )
 
+    adaptive_metrics = (
+        ("degradation_detection_ms", "Degradation detection", "ms"),
+        ("route_shift_ms", "Route shift after cost change", "ms"),
+        ("hold_down_observed_ms", "Observed routing hold-down", "ms"),
+        ("route_restore_ms", "Primary route restoration", "ms"),
+        ("minimum_degraded_link_health", "Minimum degraded link health", "score"),
+    )
+    adaptive_statistics: dict[str, DescriptiveStatistics] = {}
+    if adaptive_routing is not None:
+        for metric, label, unit in adaptive_metrics:
+            item = describe_95(adaptive_routing[metric].dropna().tolist())
+            adaptive_statistics[metric] = item
+            rows.append(
+                {
+                    "experiment": "ADAPTIVE_ROUTING",
+                    "scenario": "CLOSED_LOOP",
+                    "metric": metric,
+                    "label": label,
+                    "unit": unit,
+                    "n": item.count,
+                    "mean": item.mean,
+                    "std": item.standard_deviation,
+                    "ci95_low": item.ci95_low,
+                    "ci95_high": item.ci95_high,
+                    "minimum": item.minimum,
+                    "maximum": item.maximum,
+                }
+            )
+
     controller_timings = (
         ("controller_response_seconds", "ANRE response time"),
         ("recovery_to_normal_seconds", "ANRE recovery-to-NORMAL time"),
@@ -376,6 +426,7 @@ def main() -> int:
         f"Congestion source: `{congestion_path.name}`",
         f"Failure source: `{failure_path.name}`",
         f"OSPF source: `{ospf_path.name}`" if ospf_path else "OSPF source: not available",
+        f"Adaptive-routing source: `{adaptive_path.name}`" if adaptive_path else "Adaptive-routing source: not available",
         "",
         f"The congestion analysis uses {len(set(congestion['repetition']))} matched "
         f"repetitions across {len(scenarios)} scenario(s). Values report sample "
@@ -450,6 +501,23 @@ def main() -> int:
                 f"| {label} | "
                 f"{_format_estimate(ospf_statistics[metric]['OSPF_DEFAULT'], unit)} | "
                 f"{_format_estimate(ospf_statistics[metric]['OSPF_TUNED'], unit)} |"
+            )
+
+    if adaptive_routing is not None:
+        lines.extend(
+            [
+                "",
+                "## Closed-loop adaptive routing",
+                "",
+                "| Metric | Mean, SD and 95% CI | Range |",
+                "|---|---:|---:|",
+            ]
+        )
+        for metric, label, unit in adaptive_metrics:
+            item = adaptive_statistics[metric]
+            lines.append(
+                f"| {label} | {_format_estimate(item, unit)} | "
+                f"{item.minimum:.3f} to {item.maximum:.3f} {unit} |"
             )
 
     lines.extend(
@@ -539,6 +607,10 @@ def main() -> int:
 
     print(f"Congestion group: {congestion['group_id'].iloc[0]}")
     print(f"Failure group: {failure['group_id'].iloc[0]}")
+    if adaptive_routing is not None:
+        print(
+            f"Adaptive-routing group: {adaptive_routing['group_id'].iloc[0]}"
+        )
     for name, supported, _ in hypotheses:
         print(f"{'SUPPORTED' if supported else 'NOT SUPPORTED'}: {name}")
     print(f"{h7_outcome.upper()}: H7 - Tuned OSPF")

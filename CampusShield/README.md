@@ -620,6 +620,37 @@ Successful collection ends with `OSPF OPTIMIZATION EXPERIMENT PASSED`. H7 is
 supported only when the measured tuned mean service interruption is lower than
 the measured default mean.
 
+## Run Experiment 5 - closed-loop adaptive routing
+
+Phase 4 connects ANRE and adaptive routing to the same live observation loop.
+The experiment keeps R1-R2 physically up while adding 80 ms delay and 30%
+packet loss to all three QoS classes. Real EF-marked probes lower the measured
+link-health score; persistent degradation then triggers both QoS protection and
+an OSPF cost change from 10 to 100. The runner verifies the route moves from
+R1-R2 to R1-R3-R2, removes the impairment, enforces the full 45-second
+anti-flapping hold-down, and restores cost 100 to 10 only after sustained
+recovery.
+
+```bash
+source ~/.venvs/campusshield/bin/activate
+cd "/mnt/d/CNDC Project/CampusShield"
+sudo "$(which python3)" experiments/experiment_runner.py adaptive-routing \
+  --repetitions 10 \
+  --hold-down 45
+```
+
+Use `--repetitions 1` only for a pilot. Every run stores link-health telemetry,
+ANRE state changes, QoS actions, OSPF-cost actions, route evidence, and timing
+metrics in SQLite. The repeated artifacts are:
+
+```text
+results/adaptive_routing_<group-id>.csv
+results/adaptive_routing_<group-id>.png
+```
+
+Successful collection ends with
+`CLOSED-LOOP ADAPTIVE ROUTING EXPERIMENT PASSED`.
+
 ## Analyze the repeated core experiments
 
 After the ten-repetition three-arm congestion command and the repeated failure
@@ -631,8 +662,8 @@ cd "/mnt/d/CNDC Project/CampusShield"
 python3 experiments/analyze_results.py
 ```
 
-When Phase 3 evidence exists, the analyzer also requires ten complete matched
-default/tuned OSPF repetitions. It reports means, sample standard
+When Phase 3 or Phase 4 evidence exists, the analyzer also requires ten
+complete OSPF or adaptive-routing repetitions. It reports means, sample standard
 deviations, two-sided 95% Student-t confidence intervals, adaptive-versus-basic
 changes, adaptive-versus-tuned changes, and the measured H7 outcome. For a legacy or pilot dataset, the
 minimum may be lowered explicitly, for example

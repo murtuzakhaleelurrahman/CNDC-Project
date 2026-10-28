@@ -3,6 +3,7 @@
 Congestion source: `congestion_comparison_20261024T060539Z.csv`
 Failure source: `failure_recovery_20261024T070725Z.csv`
 OSPF source: `ospf_optimization_20261025T154113Z.csv`
+Adaptive-routing source: `adaptive_routing_20261025T172218Z.csv`
 
 The congestion analysis uses 10 matched repetitions across 3 scenario(s). Values report sample standard deviation and two-sided 95% Student-t confidence intervals.
 
@@ -55,6 +56,16 @@ The congestion analysis uses 10 matched repetitions across 3 scenario(s). Values
 | Service interruption | 32816.542 +/- 61.007 ms [95% CI 32772.904 to 32860.180] | 2697.388 +/- 46.550 ms [95% CI 2664.091 to 2730.685] |
 | Backup route convergence | 32615.573 +/- 79.824 ms [95% CI 32558.474 to 32672.671] | 2521.234 +/- 53.082 ms [95% CI 2483.264 to 2559.204] |
 | Primary route restoration | 9316.351 +/- 112.537 ms [95% CI 9235.852 to 9396.850] | 337.067 +/- 18.930 ms [95% CI 323.526 to 350.608] |
+
+## Closed-loop adaptive routing
+
+| Metric | Mean, SD and 95% CI | Range |
+|---|---:|---:|
+| Degradation detection | 4091.489 +/- 975.938 ms [95% CI 3393.394 to 4789.585] | 3733.257 to 6867.830 ms |
+| Route shift after cost change | 3.251 +/- 0.589 ms [95% CI 2.829 to 3.672] | 2.297 to 4.019 ms |
+| Observed routing hold-down | 47084.785 +/- 373.312 ms [95% CI 46817.753 to 47351.818] | 46779.412 to 47679.497 ms |
+| Primary route restoration | 3.328 +/- 0.485 ms [95% CI 2.981 to 3.675] | 2.770 to 4.374 ms |
+| Minimum degraded link health | 36.799 +/- 1.433 score [95% CI 35.774 to 37.825] | 35.999 to 39.999 score |
 
 ## Hypothesis evaluation
 

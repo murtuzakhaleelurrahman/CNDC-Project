@@ -27,7 +27,8 @@ If your prompt already begins with `(campusshield)`, the environment is active.
 | Experiment 2: three-arm phased congestion | `sudo "$(which python3)" experiments/experiment_runner.py congestion --healthy-duration 10 --duration 30 --recovery-duration 20 --repetitions 10` | SQLite runs, comparison CSV and PNG |
 | Experiment 3: physical link failure and recovery | `sudo "$(which python3)" experiments/experiment_runner.py failure --repetitions 10 --timeout 20` | SQLite runs, recovery CSV and PNG |
 | Experiment 4: default vs tuned OSPF | `sudo "$(which python3)" experiments/experiment_runner.py ospf --repetitions 10 --timeout 55` | SQLite runs, OSPF comparison CSV and PNG |
-| Analyze Experiments 2, 3, and 4 | `python3 experiments/analyze_results.py` | Summary CSV, analysis Markdown, summary PNG |
+| Experiment 5: closed-loop adaptive routing | `sudo "$(which python3)" experiments/experiment_runner.py adaptive-routing --repetitions 10 --hold-down 45` | SQLite telemetry/events, adaptive-routing CSV and PNG |
+| Analyze Experiments 2–5 | `python3 experiments/analyze_results.py` | Summary CSV, analysis Markdown, summary PNG |
 
 Run only one Mininet experiment at a time.
 
@@ -117,10 +118,33 @@ Use ten repetitions for the formal H7 result. For a pilot only, change
 `--repetitions 10` to `--repetitions 1`; keep `--timeout 55` because the
 default dead interval is approximately 40 seconds.
 
+## Experiment 5 - closed-loop adaptive routing
+
+```bash
+source ~/.venvs/campusshield/bin/activate
+cd "/mnt/d/CNDC Project/CampusShield"
+sudo "$(which python3)" experiments/experiment_runner.py adaptive-routing --repetitions 10 --hold-down 45
+```
+
+What it does: adds controlled delay and loss to the still-up R1-R2 link,
+measures its health, runs ANRE and adaptive routing in one controller loop,
+changes QoS on ANRE transitions, raises the R1-R2 OSPF cost from 10 to 100,
+verifies the R1-R3-R2 backup path, enforces the 45-second hold-down, and then
+restores cost 100 to 10 and the direct route.
+
+Expected final message: `CLOSED-LOOP ADAPTIVE ROUTING EXPERIMENT PASSED`
+
+Files: `results/adaptive_routing_<group-id>.csv` and
+`results/adaptive_routing_<group-id>.png`
+
+Use ten repetitions for formal confidence intervals. For a pilot only, change
+`--repetitions 10` to `--repetitions 1`; keep the 45-second hold-down for an
+honest anti-flapping test.
+
 ## Analyze repeated experiments
 
 Run this after completing ten matched congestion repetitions, ten failure
-repetitions, and ten matched OSPF repetitions:
+repetitions, ten matched OSPF repetitions, and ten adaptive-routing repetitions:
 
 ```bash
 source ~/.venvs/campusshield/bin/activate

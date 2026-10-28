@@ -10,7 +10,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from mininet.log import info
+try:
+    from mininet.log import info
+except ModuleNotFoundError:  # Pure controller tests do not require Mininet.
+    def info(_message: str) -> None:
+        return None
 
 
 VTY_ROOT = Path("/tmp/campusshield-frr")

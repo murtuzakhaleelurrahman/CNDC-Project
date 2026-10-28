@@ -54,6 +54,7 @@ RUN_TYPE_LABELS = {
     "FAILURE_RECOVERY": "Recovery",
     "OSPF_DEFAULT": "OSPF default",
     "OSPF_TUNED": "OSPF tuned",
+    "ADAPTIVE_ROUTING": "Adaptive routing",
     "VALIDATION": "Validation",
 }
 
@@ -620,6 +621,7 @@ def render_experiments() -> None:
     congestion, congestion_path = read_result("congestion_comparison_*.csv")
     failure, failure_path = read_result("failure_recovery_*.csv")
     ospf, ospf_path = read_result("ospf_optimization_*.csv")
+    adaptive_routing, adaptive_routing_path = read_result("adaptive_routing_*.csv")
     section_header("Experiment 1 · Baseline calibration", baseline_path.name if baseline_path else "No result file")
     if baseline is None or baseline.empty:
         empty_state("No baseline CSV is available.")
@@ -738,6 +740,52 @@ def render_experiments() -> None:
             ("Recovery improvement", display_value(improvement, "%", 2)),
             ("Default packets lost", display_value(default_rows["packets_lost_during_convergence"].mean(), "", 2)),
             ("Tuned packets lost", display_value(tuned_rows["packets_lost_during_convergence"].mean(), "", 2)),
+        ]), unsafe_allow_html=True)
+
+    routing_note = (
+        adaptive_routing_path.name if adaptive_routing_path else "No result file"
+    )
+    if adaptive_routing is not None and not adaptive_routing.empty:
+        routing_repetitions = int(adaptive_routing["repetition"].nunique())
+        routing_note += (
+            f" · Formal evidence ({routing_repetitions} repetitions)"
+            if routing_repetitions >= 10
+            else f" · Pilot evidence ({routing_repetitions} of 10 repetitions)"
+        )
+    section_header("Experiment 5 · Closed-loop adaptive routing", routing_note)
+    if adaptive_routing is None or adaptive_routing.empty:
+        empty_state("No adaptive-routing experiment is available yet.")
+    else:
+        routing_chart = go.Figure()
+        for metric, label, color in (
+            ("degradation_detection_ms", "Degradation detection", COLORS["amber"]),
+            ("route_shift_ms", "Route shift", COLORS["cyan"]),
+            ("route_restore_ms", "Route restoration", COLORS["green"]),
+        ):
+            routing_chart.add_bar(
+                name=label,
+                x=adaptive_routing["repetition"],
+                y=adaptive_routing[metric],
+                marker_color=color,
+            )
+        routing_chart.update_layout(
+            title="Controller and routing response by repetition",
+            barmode="group",
+            xaxis_title="Repetition",
+            yaxis_title="Milliseconds",
+        )
+        st.plotly_chart(
+            style_figure(routing_chart, 340),
+            width="stretch",
+            config={"displaylogo": False},
+        )
+        st.markdown(panel_html("Closed-loop evidence", [
+            ("Mean degradation detection", display_value(adaptive_routing["degradation_detection_ms"].mean(), " ms", 2)),
+            ("Mean route shift", display_value(adaptive_routing["route_shift_ms"].mean(), " ms", 2)),
+            ("Configured hold-down", display_value(adaptive_routing["hold_down_seconds"].mean(), " s", 1)),
+            ("Observed hold-down", display_value(adaptive_routing["hold_down_observed_ms"].mean(), " ms", 2)),
+            ("Mean route restoration", display_value(adaptive_routing["route_restore_ms"].mean(), " ms", 2)),
+            ("Final ANRE state", ", ".join(sorted(set(adaptive_routing["final_anre_state"].astype(str))))),
         ]), unsafe_allow_html=True)
 
     if congestion is not None and not congestion.empty and failure is not None and not failure.empty:
